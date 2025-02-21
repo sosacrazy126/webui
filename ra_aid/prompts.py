@@ -127,13 +127,7 @@ Because this is a new project:
 # Research stage prompt - guides initial codebase analysis
 RESEARCH_PROMPT = """Current Date: {current_date}
 
-<user instruction>
-{base_task}
-</user instruction>
-
-KEEP IT SIMPLE
-
-consult with the expert frequently, especially when you have any doubts about high level logic, planning, or debugging. the expert does not have access to the internet or any code that you have not given it explicitly in its context.
+User query: {base_task} consult with the expert frequently --keep it simple
 
 Context from Previous Research (if available):
 Key Facts:
@@ -578,9 +572,6 @@ Guidelines:
       Only test things that can be tested by an automated process.
     
     Are you writing a program that needs to be compiled? Make sure it compiles, if relevant.
-
-    After finalizing the overall approach:
-        Think carefully about the high-level implementation plan and request task implementation one-by-one.
 
     Once you are absolutely sure you are completed planning, you may begin to call request_task_implementation one-by-one for each task to implement the plan.
     If you have any doubt about the correctness or thoroughness of the plan, consult the expert (if expert is available) for verification.
