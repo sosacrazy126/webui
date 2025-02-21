@@ -119,11 +119,6 @@ def create_openrouter_client(
     is_expert: bool = False,
 ) -> BaseChatModel:
     """Create OpenRouter client with appropriate configuration."""
-    default_headers = {
-        "HTTP-Referer": "https://ra-aid.ai",
-        "X-Title": "RA.Aid"
-    }
-    
     if model_name.startswith("deepseek/") and "deepseek-r1" in model_name.lower():
         return ChatDeepseekReasoner(
             api_key=api_key,
@@ -134,7 +129,6 @@ def create_openrouter_client(
             model=model_name,
             timeout=LLM_REQUEST_TIMEOUT,
             max_retries=LLM_MAX_RETRIES,
-            default_headers=default_headers,
         )
 
     return ChatOpenAI(
@@ -143,7 +137,6 @@ def create_openrouter_client(
         model=model_name,
         timeout=LLM_REQUEST_TIMEOUT,
         max_retries=LLM_MAX_RETRIES,
-        default_headers=default_headers,
         **({"temperature": temperature} if temperature is not None else {}),
     )
 
