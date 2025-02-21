@@ -106,7 +106,7 @@ def get_research_tools(
 
     # Add modification tools if not research_only
     if not research_only:
-        tools.extend(MODIFICATION_TOOLS)
+        # tools.extend(MODIFICATION_TOOLS)
         tools.append(request_implementation)
 
     # Add expert tools if enabled

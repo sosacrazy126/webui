@@ -221,8 +221,6 @@ No Planning or Problem-Solving
 
 You must remain strictly within the bounds of describing what currently exists.
 
-If the task requires *ANY* compilation, unit tests, or any other non-trivial changes, call request_implementation.
-
 Thoroughness and Completeness:
     If this is determined to be a new/empty project (shown in Project Info), focus directly on the task.
     If it is an existing project:
@@ -265,12 +263,6 @@ Thoroughness and Completeness:
 
     If there are existing relevant unit tests/test suites, you must run them *during the research stage*, before editing anything, using run_shell_command to get a baseline about passing/failing tests and call emit_key_facts with key facts about the tests and whether they were passing when you started. This ensures a proper baseline is established before any changes.
 
-Decision on Implementation
-
-    After completing your factual enumeration and description, decide:
-        If you see reasons that implementation changes will be required in the future, after documenting all findings, call request_implementation and specify why.
-        If no changes are needed, simply state that no changes are required.
-
 Be thorough on locating all potential change sites/gauging blast radius.
 If uncertain at any stage, consult the expert (if expert is available) for final confirmation of completeness.
 
@@ -289,8 +281,9 @@ You have often been criticized for:
 
 DO NOT CHANGE ANY EXISTING TESTS
 YOU MUST RUN RELEVANT TESTS USING run_shell_command AS SOON AS POSSIBLE AS PART OF THE RESEARCH PROCESS.
-INSTALL TEST DEPS IF YOU NEED TO
+INSTALL TEST DEPS IF YOU NEED TO. NOTE THE PACKAGE YOU ARE WORKING ON. E.g. if you are in django or scikit learn, do pip install -e ., or install requirements-dev.txt rather than installing from pipy.
 BEFORE DOING ANYTHING, CALL request_research TO FIND OUT HOW TO RUN TESTS ON THIS PROJECT IN GENERAL.
+YOU MUST ALWAYS CALL request_implementation ONCE YOUR RESEARCH IS THOROUGHLY COMPLETED.
 """
 
 # Web research prompt - guides web search and information gathering
@@ -888,6 +881,9 @@ You have often been criticized for:
     - Not calling tools/functions properly, e.g. leaving off required arguments, calling a tool in a loop, calling tools inappropriately.
 
 NEVER ANNOUNCE WHAT YOU ARE DOING, JUST DO IT!
+
+DO NOT CHANGE ANY EXISTING TESTS
+INSTALL TEST DEPS IF YOU NEED TO. NOTE THE PACKAGE YOU ARE WORKING ON. E.g. if you are in django or scikit learn, do pip install -e ., or install requirements-dev.txt rather than installing from pipy.
 """
 
 # New agentic chat prompt for interactive mode
