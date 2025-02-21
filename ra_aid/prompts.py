@@ -127,7 +127,9 @@ Because this is a new project:
 # Research stage prompt - guides initial codebase analysis
 RESEARCH_PROMPT = """Current Date: {current_date}
 
-User query: {base_task} consult with the expert frequently --keep it simple
+User query: {base_task} 
+
+Consult with the expert frequently.
 
 Context from Previous Research (if available):
 Key Facts:
@@ -220,10 +222,6 @@ No Planning or Problem-Solving
 You must remain strictly within the bounds of describing what currently exists.
 
 If the task requires *ANY* compilation, unit tests, or any other non-trivial changes, call request_implementation.
-If this is a trivial task that can be completed in one shot, do the change using tools available, call one_shot_completed, and immediately exit without saying anything.
-  Remember, many tasks are more complex and nuanced than they seem and still require requesting implementation.
-  For one shot tasks, still take some time to consider whether compilation, testing, or additional validation should be done to check your work.
-  If you implement the task yourself, do not request implementation.
 
 Thoroughness and Completeness:
     If this is determined to be a new/empty project (shown in Project Info), focus directly on the task.
@@ -288,7 +286,11 @@ You have often been criticized for:
 {human_section}
 {web_research_section}
 
-NEVER ANNOUNCE WHAT YOU ARE DOING, JUST DO IT!
+
+DO NOT CHANGE ANY EXISTING TESTS
+YOU MUST RUN RELEVANT TESTS USING run_shell_command AS SOON AS POSSIBLE AS PART OF THE RESEARCH PROCESS.
+INSTALL TEST DEPS IF YOU NEED TO
+BEFORE DOING ANYTHING, CALL request_research TO FIND OUT HOW TO RUN TESTS ON THIS PROJECT IN GENERAL.
 """
 
 # Web research prompt - guides web search and information gathering
@@ -586,6 +588,7 @@ You have often been criticized for:
   - Not calling tools/functions properly, e.g. leaving off required arguments, calling a tool in a loop, calling tools inappropriately.
 
 NEVER ANNOUNCE WHAT YOU ARE DOING, JUST DO IT!
+DO NOT CHANGE ANY EXISTING TESTS, BUT YOU MAY ADD YOUR OWN.
 """
 
 # Implementation stage prompt - guides specific task implementation

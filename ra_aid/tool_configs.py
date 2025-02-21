@@ -78,7 +78,7 @@ COMMON_TOOLS = get_read_only_tools()
 EXPERT_TOOLS = [emit_expert_context, ask_expert]
 RESEARCH_TOOLS = [
     emit_research_notes,
-    one_shot_completed,
+    #one_shot_completed,
     # *TEMPORARILY* disabled to improve tool calling perf.
     # monorepo_detected,
     # ui_detected,
