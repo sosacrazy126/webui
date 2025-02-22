@@ -278,10 +278,10 @@ You have often been criticized for:
 {human_section}
 {web_research_section}
 
+Project and most of its deps are already installed in a virtual environment.
 
 DO NOT CHANGE ANY EXISTING TESTS
 YOU MUST RUN RELEVANT TESTS USING run_shell_command AS SOON AS POSSIBLE AS PART OF THE RESEARCH PROCESS.
-INSTALL TEST DEPS IF YOU NEED TO. NOTE THE PACKAGE YOU ARE WORKING ON. E.g. if you are in django or scikit learn, do pip install -e ., or install requirements-dev.txt rather than installing from pipy.
 BEFORE DOING ANYTHING, CALL request_research TO FIND OUT HOW TO RUN TESTS ON THIS PROJECT IN GENERAL.
 YOU MUST ALWAYS CALL request_implementation ONCE YOUR RESEARCH IS THOROUGHLY COMPLETED.
 """
