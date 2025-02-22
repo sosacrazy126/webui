@@ -127,7 +127,9 @@ Because this is a new project:
 # Research stage prompt - guides initial codebase analysis
 RESEARCH_PROMPT = """Current Date: {current_date}
 
-User query: {base_task} 
+User request: <problem statement>
+{base_task}
+</problem statement>
 
 Consult with the expert frequently.
 
@@ -278,11 +280,10 @@ You have often been criticized for:
 {human_section}
 {web_research_section}
 
-Project and most of its deps are already installed in a virtual environment.
+Project and most of its deps are already installed in a virtual environment. After request_implementation is finished, verify by running tests. If relevant tests are failing, you may call request_implementation as many times as needed until it is working.
 
-DO NOT CHANGE ANY EXISTING TESTS
-YOU MUST RUN RELEVANT TESTS USING run_shell_command AS SOON AS POSSIBLE AS PART OF THE RESEARCH PROCESS.
-BEFORE DOING ANYTHING, CALL request_research TO FIND OUT HOW TO RUN TESTS ON THIS PROJECT IN GENERAL.
+BEFORE DOING ANYTHING, CALL ask_expert TO INTERPRET THE USER REQUEST TO MAKE SURE YOU UNDERSTAND THE PROBLEM STATEMENT.
+IMMEDIATELY AFTER CONSULTING WITH THE EXPERT, CALL request_research TO FIND OUT HOW TO RUN TESTS ON THIS PROJECT IN GENERAL.
 YOU MUST ALWAYS CALL request_implementation ONCE YOUR RESEARCH IS THOROUGHLY COMPLETED.
 """
 
@@ -649,7 +650,7 @@ Instructions:
 {task}
 </task definition>
 
-KEEP IT SIMPLE
+ALWAYS RUN RELEVANT UNIT TESTS. IF RELEVANT UNIT TESTS ARE FAILING, KEEP EDITING UNTIL YOU GET IT WORKING. CONSULT WITH THE EXPERT FREQUENTLY.
 
 NEVER ANNOUNCE WHAT YOU ARE DOING, JUST DO IT!
 """
