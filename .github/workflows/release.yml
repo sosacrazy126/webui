@@ -75,3 +75,240 @@ jobs:
           files: |
             dist/*.tar.gz
             dist/*.whl
+  update-brew-formula:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout this repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+
+      - name: Create virtual environment and install dependencies
+        run: |
+          python -m venv .venv
+          source .venv/bin/activate
+          pip install --upgrade pip
+          pip install ra-aid homebrew-pypi-poet
+
+      - name: Clone homebrew-ra-aid repository
+        run: |
+          # Using HTTPS with the provided GITHUB_TOKEN for authentication.
+          git clone https://github.com/ai-christianson/homebrew-ra-aid.git
+
+      - name: Generate Brew Formula with poet
+        run: |
+          cd homebrew-ra-aid
+          poet -f ra-aid > Formula/ra-aid.rb
+
+      - name: Update Formula/ra-aid.rb
+        run: |
+          cd homebrew-ra-aid
+          # --- Update description and homepage ---
+          sed -i '' 's/desc "Shiny new formula"/desc "RA.Aid (pronounced \\\"raid\\\") helps you develop software autonomously"/' Formula/ra-aid.rb
+          sed -i '' 's/homepage "None"/homepage "https:\/\/github.com\/ai-christianson\/RA.Aid"/' Formula/ra-aid.rb
+          
+          # Insert the license line after the homepage line using awk
+          awk '/homepage "https:\/\/github.com\/ai-christianson\/RA.Aid"/ {print; print "  license \"Apache-2.0\""; next} 1' Formula/ra-aid.rb > tmp && mv tmp Formula/ra-aid.rb
+
+      - name: Replace python dependency with build dependencies
+        run: |
+          cd homebrew-ra-aid
+          awk '/depends_on "python3"/ {
+            print "  depends_on \"cmake\" => :build";
+            print "  depends_on \"ninja\" => :build";
+            print "  depends_on \"rust\" => :build";
+            print "  depends_on \"certifi\"";
+            print "  depends_on \"cffi\"";
+            print "  depends_on \"libmagic\"";
+            print "  depends_on \"libyaml\"";
+            print "  depends_on \"numpy\"";
+            print "  depends_on \"pillow\"";
+            print "  depends_on \"python-setuptools\"";
+            print "  depends_on \"python@3.12\"";
+            print "  depends_on \"ripgrep\"";
+            print "  depends_on \"scipy\"";
+            next
+          }
+          { print }' Formula/ra-aid.rb > tmp && mv tmp Formula/ra-aid.rb
+          
+          # --- Update tree-sitter-languages resource block ---
+          perl -0777 -pi -e 's/resource "tree-sitter-languages" do.*?end/  # shoutout to aider for figuring this one out\n  # sdist issue report, https:\/\/github.com\/grantjenks\/py-tree-sitter-languages\/issues\/63\n  resource "tree-sitter-languages" do\n    url "https:\/\/github.com\/grantjenks\/py-tree-sitter-languages\/archive\/refs\/tags\/v1.10.2.tar.gz"\n    sha256 "cdd03196ebaf8f486db004acd07a5b39679562894b47af6b20d28e4aed1a6ab5"\n  end/s' Formula/ra-aid.rb
+
+      - name: Update install and test blocks with Python
+        run: |
+          cd homebrew-ra-aid
+          patch -F3 Formula/ra-aid.rb <<'EOF'
+          --- Formula/ra-aid.rb	2025-03-07 15:04:18
+          +++ ra-aid.fixed.rb	2025-03-07 15:38:33
+          @@ -717,8 +717,42 @@
+             end
+          
+             def install
+          -    virtualenv_create(libexec, "python3")
+          -    virtualenv_install_with_resources
+          +    # Shoutout to aider whom figured out dealing with the tree-sitter-languages issue
+          +    venv = virtualenv_install_with_resources without: ["tree-sitter-languages", "Levenshtein", "RapidFuzz"]
+          +
+          +    # Requires building languages outside `setup.py`: https://github.com/grantjenks/py-tree-sitter-languages/pull/65
+          +    resource("tree-sitter-languages").stage do
+          +      ENV.prepend_path "PYTHONPATH", Formula["cython"].opt_libexec/Language::Python.site_packages(python3)
+          +      system venv.root/"bin/python", "build.py"
+          +      venv.pip_install Pathname.pwd
+          +    end
+          +
+          +    resource("Levenshtein").stage do
+          +      # Now we're in the unpacked Levenshtein source directory
+          +      inreplace "pyproject.toml", /^Changelog\s*=.*$/, ""
+          +      inreplace "pyproject.toml", /^Documentation\s*=.*$/, ""
+          +      inreplace "pyproject.toml", /^Homepage\s*=.*$/, ""
+          +      inreplace "pyproject.toml", /^Issues\s*=.*$/, ""
+          +      inreplace "pyproject.toml", /^Repository\s*=.*$/, ""
+          +
+          +      # Then install just Levenshtein from this local directory
+          +      venv.pip_install Pathname.pwd
+          +    end
+          +
+          +    resource("RapidFuzz").stage do
+          +      # Now we're in the unpacked Levenshtein source directory
+          +      inreplace "pyproject.toml", /^Changelog\s*=.*$/, ""
+          +      inreplace "pyproject.toml", /^Documentation\s*=.*$/, ""
+          +      inreplace "pyproject.toml", /^Homepage\s*=.*$/, ""
+          +      inreplace "pyproject.toml", /^Issues\s*=.*$/, ""
+          +      inreplace "pyproject.toml", /^Repository\s*=.*$/, ""
+          +
+          +      # Then install just Levenshtein from this local directory
+          +      venv.pip_install Pathname.pwd
+          +    end
+          +
+          +    # Create symlinks for all executables in the virtualenv's bin
+          +    bin.install_symlink Dir["#{libexec}/bin/ra-aid"]
+             end
+          
+             test do
+          EOF
+          
+      - name: Insert cython resource block
+        run: |
+          cd homebrew-ra-aid
+          python <<'EOF'
+          import re
+          
+          # Read the current contents of the formula file.
+          with open("Formula/ra-aid.rb", "r") as f:
+              content = f.read()
+          
+          # The cython resource block to be inserted.
+          cython_resource = '''  resource "cython" do
+              url "https://files.pythonhosted.org/packages/84/4d/b720d6000f4ca77f030bd70f12550820f0766b568e43f11af7f7ad9061aa/cython-3.0.11.tar.gz"
+              sha256 "7146dd2af8682b4ca61331851e6aebce9fe5158e75300343f80c07ca80b1faff"
+            end
+          '''
+          
+          # Regex to find resource blocks. Group 2 captures the resource name.
+          resource_pattern = re.compile(r'(resource\s+"([^"]+)"\s+do.*?end)', re.DOTALL)
+          matches = list(resource_pattern.finditer(content))
+          
+          insertion_index = None
+          if matches:
+              # Loop over each resource block to determine where "cython" belongs.
+              for match in matches:
+                  res_name = match.group(2).lower()
+                  if res_name > "cython":
+                      insertion_index = match.start()
+                      break
+              if insertion_index is None:
+                  # "cython" is alphabetically after all existing resources.
+                  insertion_index = matches[-1].end()
+              # Insert with a preceding newline for readability.
+              new_content = content[:insertion_index] + "\n" + cython_resource + "\n" + content[insertion_index:]
+          else:
+              # Fallback: no resource blocks found, insert before the first method definition.
+              new_content = re.sub(r'(?=def )', cython_resource + "\n\n", content, count=1)
+          
+          with open("Formula/ra-aid.rb", "w") as f:
+              f.write(new_content)
+          EOF
+
+      - name: Remove resource blocks for libraries listed in depends_on
+        run: |
+          cd homebrew-ra-aid
+          python <<'EOF'
+          import re
+          
+          with open("Formula/ra-aid.rb", "r") as f:
+              content = f.read()
+          
+          # Extract all libraries mentioned in depends_on lines.
+          depends_libs = re.findall(r'depends_on\s+"([^"]+)"', content)
+          if depends_libs:
+              # Remove duplicates and sort for consistency.
+              libs_set = set(depends_libs)
+              # Escape library names for regex use.
+              escaped_libs = [re.escape(lib) for lib in libs_set]
+              libs_pattern = "|".join(escaped_libs)
+              # Pattern to match resource blocks for any of these libraries.
+              resource_pattern = re.compile(
+                  r'\n?\s*resource\s+"(' + libs_pattern + r')"\s+do.*?end\s*\n?',
+                  re.DOTALL
+              )
+              new_content, count = re.subn(resource_pattern, '\n\n', content)
+              print(f"Removed {count} resource block(s) for libraries from depends_on.")
+          else:
+              new_content = content
+              print("No depends_on libraries found.")
+          
+          with open("Formula/ra-aid.rb", "w") as f:
+              f.write(new_content)
+          EOF
+
+      - name: Fix Ruby Formating Issues
+        run: |
+          cd homebrew-ra-aid
+          brew style --fix Formula/ra-aid.rb
+
+      - name: Define python3 as 3.12
+        run: |
+          cd homebrew-ra-aid
+          patch -F3 Formula/ra-aid.rb <<'EOF'
+          --- Formula/ra-aid.rb	2025-03-07 15:51:32
+          +++ ra-aid.fixed.rb	2025-03-07 16:02:06
+          @@ -694,6 +694,10 @@
+             resource "zstandard" do
+               url "https://files.pythonhosted.org/packages/ed/f6/2ac0287b442160a89d726b17a9184a4c615bb5237db763791a7fd16d9df1/zstandard-0.23.0.tar.gz"
+               sha256 "b2d8c62d08e7255f68f7a740bae85b3c9b8e5466baa9cbf7f57f1cde0ac6bc09"
+          +  end
+          +
+          +  def python3
+          +    "python3.12"
+             end
+          
+             def install
+          EOF
+
+      - name: Update test block
+        run: |
+          cd homebrew-ra-aid
+          patch -F3 Formula/ra-aid.rb <<'EOF'
+          --- Formula/ra-aid.rb 2025-03-07 16:42:03
+          +++ ra-aid.fixed.rb 2025-03-07 16:53:04
+          @@ -746,6 +746,6 @@
+             end
+          
+             test do
+          -    false
+          +    assert_match version.to_s, shell_output("#{bin}/ra-aid --version")
+             end
+           end
+          EOF
+
+#      - name: Commit and push changes
+#        run: |
+#          cd homebrew-ra-aid
+#          git config user.name "GitHub Actions"
+#          git config user.email "actions@github.com"
+#          git add Formula/ra-aid.rb
+#          git commit -m "Intelligent update message" || echo "No changes to commit"
+#          git push
