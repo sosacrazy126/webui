@@ -1,5 +1,6 @@
 """Utility functions for working with agents."""
 
+import inspect
 import os
 import signal
 import sys
@@ -8,6 +9,9 @@ import time
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional, Sequence
+
+from ra_aid.callbacks.anthropic_callback_handler import AnthropicCallbackHandler
+
 
 import litellm
 from anthropic import APIError, APITimeoutError, InternalServerError, RateLimitError
@@ -49,7 +53,9 @@ from ra_aid.exceptions import (
 )
 from ra_aid.fallback_handler import FallbackHandler
 from ra_aid.logging_config import get_logger
+from ra_aid.llm import initialize_expert_llm
 from ra_aid.models_params import DEFAULT_TOKEN_LIMIT, models_params
+from ra_aid.text.processing import process_thinking_content
 from ra_aid.project_info import (
     display_project_status,
     format_project_info,
@@ -68,6 +74,11 @@ from ra_aid.prompts.human_prompts import (
 from ra_aid.prompts.implementation_prompts import IMPLEMENTATION_PROMPT
 from ra_aid.prompts.common_prompts import NEW_PROJECT_HINTS
 from ra_aid.prompts.planning_prompts import PLANNING_PROMPT
+from ra_aid.prompts.reasoning_assist_prompt import (
+    REASONING_ASSIST_PROMPT_PLANNING,
+    REASONING_ASSIST_PROMPT_IMPLEMENTATION,
+    REASONING_ASSIST_PROMPT_RESEARCH,
+)
 from ra_aid.prompts.research_prompts import (
     RESEARCH_ONLY_PROMPT,
     RESEARCH_PROMPT,
@@ -86,9 +97,16 @@ from ra_aid.tool_configs import (
 )
 from ra_aid.tools.handle_user_defined_test_cmd_execution import execute_test_command
 from ra_aid.database.repositories.key_fact_repository import get_key_fact_repository
-from ra_aid.database.repositories.key_snippet_repository import get_key_snippet_repository
-from ra_aid.database.repositories.human_input_repository import get_human_input_repository
-from ra_aid.database.repositories.research_note_repository import get_research_note_repository
+from ra_aid.database.repositories.key_snippet_repository import (
+    get_key_snippet_repository,
+)
+from ra_aid.database.repositories.human_input_repository import (
+    get_human_input_repository,
+)
+from ra_aid.database.repositories.research_note_repository import (
+    get_research_note_repository,
+)
+from ra_aid.database.repositories.trajectory_repository import get_trajectory_repository
 from ra_aid.database.repositories.work_log_repository import get_work_log_repository
 from ra_aid.model_formatters import format_key_facts_dict
 from ra_aid.model_formatters.key_snippets_formatter import format_key_snippets_dict
@@ -98,6 +116,7 @@ from ra_aid.tools.memory import (
     log_work_event,
 )
 from ra_aid.database.repositories.config_repository import get_config_repository
+from ra_aid.env_inv_context import get_env_inv
 
 console = Console()
 
@@ -172,6 +191,15 @@ def get_model_token_limit(
         Optional[int]: The token limit if found, None otherwise
     """
     try:
+        # Try to get config from repository for production use
+        try:
+            config_from_repo = get_config_repository().get_all()
+            # If we succeeded, use the repository config instead of passed config
+            config = config_from_repo
+        except RuntimeError:
+            # In tests, this may fail because the repository isn't set up
+            # So we'll use the passed config directly
+            pass
         if agent_type == "research":
             provider = config.get("research_provider", "") or config.get("provider", "")
             model_name = config.get("research_model", "") or config.get("model", "")
@@ -222,7 +250,6 @@ def get_model_token_limit(
 
 def build_agent_kwargs(
     checkpointer: Optional[Any] = None,
-    config: Dict[str, Any] = None,
     max_input_tokens: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Build kwargs dictionary for agent creation.
@@ -242,6 +269,7 @@ def build_agent_kwargs(
     if checkpointer is not None:
         agent_kwargs["checkpointer"] = checkpointer
 
+    config = get_config_repository().get_all()
     if config.get("limit_tokens", True) and is_anthropic_claude(config):
 
         def wrapped_state_modifier(state: AgentState) -> list[BaseMessage]:
@@ -256,12 +284,12 @@ def is_anthropic_claude(config: Dict[str, Any]) -> bool:
     """Check if the provider and model name indicate an Anthropic Claude model.
 
     Args:
-        provider: The provider name
-        model_name: The model name
+        config: Configuration dictionary containing provider and model information
 
     Returns:
         bool: True if this is an Anthropic Claude model
     """
+    # For backwards compatibility, allow passing of config directly
     provider = config.get("provider", "")
     model_name = config.get("model", "")
     result = (
@@ -301,7 +329,15 @@ def create_agent(
     config['limit_tokens'] = False.
     """
     try:
-        config = get_config_repository().get_all()
+        # Try to get config from repository for production use
+        try:
+            config_from_repo = get_config_repository().get_all()
+            # If we succeeded, use the repository config instead of passed config
+            config = config_from_repo
+        except RuntimeError:
+            # In tests, this may fail because the repository isn't set up
+            # So we'll use the passed config directly
+            pass
         max_input_tokens = (
             get_model_token_limit(config, agent_type) or DEFAULT_TOKEN_LIMIT
         )
@@ -309,8 +345,10 @@ def create_agent(
         # Use REACT agent for Anthropic Claude models, otherwise use CIAYN
         if is_anthropic_claude(config):
             logger.debug("Using create_react_agent to instantiate agent.")
-            agent_kwargs = build_agent_kwargs(checkpointer, config, max_input_tokens)
-            return create_react_agent(model, tools, interrupt_after=['tools'], **agent_kwargs)
+            agent_kwargs = build_agent_kwargs(checkpointer, max_input_tokens)
+            return create_react_agent(
+                model, tools, interrupt_after=["tools"], **agent_kwargs
+            )
         else:
             logger.debug("Using CiaynAgent agent instance")
             return CiaynAgent(model, tools, max_tokens=max_input_tokens, config=config)
@@ -320,543 +358,14 @@ def create_agent(
         logger.warning(f"Failed to detect model type: {e}. Defaulting to REACT agent.")
         config = get_config_repository().get_all()
         max_input_tokens = get_model_token_limit(config, agent_type)
-        agent_kwargs = build_agent_kwargs(checkpointer, config, max_input_tokens)
-        return create_react_agent(model, tools, interrupt_after=['tools'], **agent_kwargs)
-
-
-def run_research_agent(
-    base_task_or_query: str,
-    model,
-    *,
-    expert_enabled: bool = False,
-    research_only: bool = False,
-    hil: bool = False,
-    web_research_enabled: bool = False,
-    memory: Optional[Any] = None,
-    config: Optional[dict] = None,
-    thread_id: Optional[str] = None,
-    console_message: Optional[str] = None,
-) -> Optional[str]:
-    """Run a research agent with the given configuration.
-
-    Args:
-        base_task_or_query: The main task or query for research
-        model: The LLM model to use
-        expert_enabled: Whether expert mode is enabled
-        research_only: Whether this is a research-only task
-        hil: Whether human-in-the-loop mode is enabled
-        web_research_enabled: Whether web research is enabled
-        memory: Optional memory instance to use
-        config: Optional configuration dictionary
-        thread_id: Optional thread ID (defaults to new UUID)
-        console_message: Optional message to display before running
-
-    Returns:
-        Optional[str]: The completion message if task completed successfully
-
-    Example:
-        result = run_research_agent(
-            "Research Python async patterns",
-            model,
-            expert_enabled=True,
-            research_only=True
+        agent_kwargs = build_agent_kwargs(checkpointer, max_input_tokens)
+        return create_react_agent(
+            model, tools, interrupt_after=["tools"], **agent_kwargs
         )
-    """
-    thread_id = thread_id or str(uuid.uuid4())
-    logger.debug("Starting research agent with thread_id=%s", thread_id)
-    logger.debug(
-        "Research configuration: expert=%s, research_only=%s, hil=%s, web=%s",
-        expert_enabled,
-        research_only,
-        hil,
-        web_research_enabled,
-    )
-
-    if memory is None:
-        memory = MemorySaver()
-
-    tools = get_research_tools(
-        research_only=research_only,
-        expert_enabled=expert_enabled,
-        human_interaction=hil,
-        web_research_enabled=config.get("web_research_enabled", False),
-    )
-
-    agent = create_agent(model, tools, checkpointer=memory, agent_type="research")
-
-    expert_section = EXPERT_PROMPT_SECTION_RESEARCH if expert_enabled else ""
-    human_section = HUMAN_PROMPT_SECTION_RESEARCH if hil else ""
-    web_research_section = (
-        WEB_RESEARCH_PROMPT_SECTION_RESEARCH
-        if config.get("web_research_enabled")
-        else ""
-    )
-
-    try:
-        key_facts = format_key_facts_dict(get_key_fact_repository().get_facts_dict())
-    except RuntimeError as e:
-        logger.error(f"Failed to access key fact repository: {str(e)}")
-        key_facts = ""
-    key_snippets = format_key_snippets_dict(get_key_snippet_repository().get_snippets_dict())
-    related_files = get_related_files()
-
-    current_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    working_directory = os.getcwd()
-
-    # Get the last human input, if it exists
-    base_task = base_task_or_query
-    try:
-        human_input_repository = get_human_input_repository()
-        recent_inputs = human_input_repository.get_recent(1)
-        if recent_inputs and len(recent_inputs) > 0:
-            last_human_input = recent_inputs[0].content
-            base_task = f"<last human input>{last_human_input}</last human input>\n{base_task}"
-    except RuntimeError as e:
-        logger.error(f"Failed to access human input repository: {str(e)}")
-        # Continue without appending last human input
-
-    try:
-        project_info = get_project_info(".", file_limit=2000)
-        formatted_project_info = format_project_info(project_info)
-    except Exception as e:
-        logger.warning(f"Failed to get project info: {e}")
-        formatted_project_info = ""
-
-    prompt = (RESEARCH_ONLY_PROMPT if research_only else RESEARCH_PROMPT).format(
-        current_date=current_date,
-        working_directory=working_directory,
-        base_task=base_task,
-        research_only_note=(
-            ""
-            if research_only
-            else " Only request implementation if the user explicitly asked for changes to be made."
-        ),
-        expert_section=expert_section,
-        human_section=human_section,
-        web_research_section=web_research_section,
-        key_facts=key_facts,
-        work_log=get_work_log_repository().format_work_log(),
-        key_snippets=key_snippets,
-        related_files=related_files,
-        project_info=formatted_project_info,
-        new_project_hints=NEW_PROJECT_HINTS if project_info.is_new else "",
-    )
-
-    config = get_config_repository().get_all() if not config else config
-    recursion_limit = config.get("recursion_limit", DEFAULT_RECURSION_LIMIT)
-    run_config = {
-        "configurable": {"thread_id": thread_id},
-        "recursion_limit": recursion_limit,
-    }
-    if config:
-        run_config.update(config)
-
-    try:
-        if console_message:
-            console.print(
-                Panel(Markdown(console_message), title="🔬 Looking into it...")
-            )
-
-        if project_info:
-            display_project_status(project_info)
-
-        if agent is not None:
-            logger.debug("Research agent created successfully")
-            none_or_fallback_handler = init_fallback_handler(agent, config, tools)
-            _result = run_agent_with_retry(
-                agent, prompt, run_config, none_or_fallback_handler
-            )
-            if _result:
-                # Log research completion
-                log_work_event(f"Completed research phase for: {base_task_or_query}")
-            return _result
-        else:
-            logger.debug("No model provided, running web research tools directly")
-            return run_web_research_agent(
-                base_task_or_query,
-                model=None,
-                expert_enabled=expert_enabled,
-                hil=hil,
-                web_research_enabled=web_research_enabled,
-                memory=memory,
-                config=config,
-                thread_id=thread_id,
-                console_message=console_message,
-            )
-    except (KeyboardInterrupt, AgentInterrupt):
-        raise
-    except Exception as e:
-        logger.error("Research agent failed: %s", str(e), exc_info=True)
-        raise
 
 
-def run_web_research_agent(
-    query: str,
-    model,
-    *,
-    expert_enabled: bool = False,
-    hil: bool = False,
-    web_research_enabled: bool = False,
-    memory: Optional[Any] = None,
-    config: Optional[dict] = None,
-    thread_id: Optional[str] = None,
-    console_message: Optional[str] = None,
-) -> Optional[str]:
-    """Run a web research agent with the given configuration.
-
-    Args:
-        query: The mainquery for web research
-        model: The LLM model to use
-        expert_enabled: Whether expert mode is enabled
-        hil: Whether human-in-the-loop mode is enabled
-        web_research_enabled: Whether web research is enabled
-        memory: Optional memory instance to use
-        config: Optional configuration dictionary
-        thread_id: Optional thread ID (defaults to new UUID)
-        console_message: Optional message to display before running
-
-    Returns:
-        Optional[str]: The completion message if task completed successfully
-
-    Example:
-        result = run_web_research_agent(
-            "Research latest Python async patterns",
-            model,
-            expert_enabled=True
-        )
-    """
-    thread_id = thread_id or str(uuid.uuid4())
-    logger.debug("Starting web research agent with thread_id=%s", thread_id)
-    logger.debug(
-        "Web research configuration: expert=%s, hil=%s, web=%s",
-        expert_enabled,
-        hil,
-        web_research_enabled,
-    )
-
-    if memory is None:
-        memory = MemorySaver()
-
-    if thread_id is None:
-        thread_id = str(uuid.uuid4())
-
-    tools = get_web_research_tools(expert_enabled=expert_enabled)
-
-    agent = create_agent(model, tools, checkpointer=memory, agent_type="research")
-
-    expert_section = EXPERT_PROMPT_SECTION_RESEARCH if expert_enabled else ""
-    human_section = HUMAN_PROMPT_SECTION_RESEARCH if hil else ""
-
-    try:
-        key_facts = format_key_facts_dict(get_key_fact_repository().get_facts_dict())
-    except RuntimeError as e:
-        logger.error(f"Failed to access key fact repository: {str(e)}")
-        key_facts = ""
-    try:
-        key_snippets = format_key_snippets_dict(get_key_snippet_repository().get_snippets_dict())
-    except RuntimeError as e:
-        logger.error(f"Failed to access key snippet repository: {str(e)}")
-        key_snippets = ""
-    related_files = get_related_files()
-
-    current_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    working_directory = os.getcwd()
-
-    prompt = WEB_RESEARCH_PROMPT.format(
-        current_date=current_date,
-        working_directory=working_directory,
-        web_research_query=query,
-        expert_section=expert_section,
-        human_section=human_section,
-        key_facts=key_facts,
-        work_log=get_work_log_repository().format_work_log(),
-        key_snippets=key_snippets,
-        related_files=related_files,
-    )
-
-    config = get_config_repository().get_all() if not config else config
-
-    recursion_limit = config.get("recursion_limit", DEFAULT_RECURSION_LIMIT)
-    run_config = {
-        "configurable": {"thread_id": thread_id},
-        "recursion_limit": recursion_limit,
-    }
-    if config:
-        run_config.update(config)
-
-    try:
-        if console_message:
-            console.print(Panel(Markdown(console_message), title="🔬 Researching..."))
-
-        logger.debug("Web research agent completed successfully")
-        none_or_fallback_handler = init_fallback_handler(agent, config, tools)
-        _result = run_agent_with_retry(
-            agent, prompt, run_config, none_or_fallback_handler
-        )
-        if _result:
-            # Log web research completion
-            log_work_event(f"Completed web research phase for: {query}")
-        return _result
-
-    except (KeyboardInterrupt, AgentInterrupt):
-        raise
-    except Exception as e:
-        logger.error("Web research agent failed: %s", str(e), exc_info=True)
-        raise
-
-
-def run_planning_agent(
-    base_task: str,
-    model,
-    *,
-    expert_enabled: bool = False,
-    hil: bool = False,
-    memory: Optional[Any] = None,
-    config: Optional[dict] = None,
-    thread_id: Optional[str] = None,
-) -> Optional[str]:
-    """Run a planning agent to create implementation plans.
-
-    Args:
-        base_task: The main task to plan implementation for
-        model: The LLM model to use
-        expert_enabled: Whether expert mode is enabled
-        hil: Whether human-in-the-loop mode is enabled
-        memory: Optional memory instance to use
-        config: Optional configuration dictionary
-        thread_id: Optional thread ID (defaults to new UUID)
-
-    Returns:
-        Optional[str]: The completion message if planning completed successfully
-    """
-    thread_id = thread_id or str(uuid.uuid4())
-    logger.debug("Starting planning agent with thread_id=%s", thread_id)
-    logger.debug("Planning configuration: expert=%s, hil=%s", expert_enabled, hil)
-
-    if memory is None:
-        memory = MemorySaver()
-
-    if thread_id is None:
-        thread_id = str(uuid.uuid4())
-
-    # Get latest project info
-    try:
-        project_info = get_project_info(".")
-        formatted_project_info = format_project_info(project_info)
-    except Exception as e:
-        logger.warning("Failed to get project info: %s", str(e))
-        formatted_project_info = "Project info unavailable"
-
-    tools = get_planning_tools(
-        expert_enabled=expert_enabled,
-        web_research_enabled=config.get("web_research_enabled", False),
-    )
-
-    agent = create_agent(model, tools, checkpointer=memory, agent_type="planner")
-
-    expert_section = EXPERT_PROMPT_SECTION_PLANNING if expert_enabled else ""
-    human_section = HUMAN_PROMPT_SECTION_PLANNING if hil else ""
-    web_research_section = (
-        WEB_RESEARCH_PROMPT_SECTION_PLANNING
-        if config.get("web_research_enabled")
-        else ""
-    )
-
-    current_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    working_directory = os.getcwd()
-
-    # Make sure key_facts is defined before using it
-    try:
-        key_facts = format_key_facts_dict(get_key_fact_repository().get_facts_dict())
-    except RuntimeError as e:
-        logger.error(f"Failed to access key fact repository: {str(e)}")
-        key_facts = ""
-        
-    # Make sure key_snippets is defined before using it
-    try:
-        key_snippets = format_key_snippets_dict(get_key_snippet_repository().get_snippets_dict())
-    except RuntimeError as e:
-        logger.error(f"Failed to access key snippet repository: {str(e)}")
-        key_snippets = ""
-    
-    # Get formatted research notes using repository
-    try:
-        repository = get_research_note_repository()
-        notes_dict = repository.get_notes_dict()
-        formatted_research_notes = format_research_notes_dict(notes_dict)
-    except RuntimeError as e:
-        logger.error(f"Failed to access research note repository: {str(e)}")
-        formatted_research_notes = ""
-    
-    planning_prompt = PLANNING_PROMPT.format(
-        current_date=current_date,
-        working_directory=working_directory,
-        expert_section=expert_section,
-        human_section=human_section,
-        web_research_section=web_research_section,
-        base_task=base_task,
-        project_info=formatted_project_info,
-        research_notes=formatted_research_notes,
-        related_files="\n".join(get_related_files()),
-        key_facts=key_facts,
-        key_snippets=key_snippets,
-        work_log=get_work_log_repository().format_work_log(),
-        research_only_note=(
-            ""
-            if config.get("research_only")
-            else " Only request implementation if the user explicitly asked for changes to be made."
-        ),
-    )
-
-    config = get_config_repository().get_all() if not config else config
-    recursion_limit = config.get("recursion_limit", DEFAULT_RECURSION_LIMIT)
-    run_config = {
-        "configurable": {"thread_id": thread_id},
-        "recursion_limit": recursion_limit,
-    }
-    if config:
-        run_config.update(config)
-
-    try:
-        print_stage_header("Planning Stage")
-        logger.debug("Planning agent completed successfully")
-        none_or_fallback_handler = init_fallback_handler(agent, config, tools)
-        _result = run_agent_with_retry(
-            agent, planning_prompt, run_config, none_or_fallback_handler
-        )
-        if _result:
-            # Log planning completion
-            log_work_event(f"Completed planning phase for: {base_task}")
-        return _result
-    except (KeyboardInterrupt, AgentInterrupt):
-        raise
-    except Exception as e:
-        logger.error("Planning agent failed: %s", str(e), exc_info=True)
-        raise
-
-
-def run_task_implementation_agent(
-    base_task: str,
-    tasks: list,
-    task: str,
-    plan: str,
-    related_files: list,
-    model,
-    *,
-    expert_enabled: bool = False,
-    web_research_enabled: bool = False,
-    memory: Optional[Any] = None,
-    config: Optional[dict] = None,
-    thread_id: Optional[str] = None,
-) -> Optional[str]:
-    """Run an implementation agent for a specific task.
-
-    Args:
-        base_task: The main task being implemented
-        tasks: List of tasks to implement
-        plan: The implementation plan
-        related_files: List of related files
-        model: The LLM model to use
-        expert_enabled: Whether expert mode is enabled
-        web_research_enabled: Whether web research is enabled
-        memory: Optional memory instance to use
-        config: Optional configuration dictionary
-        thread_id: Optional thread ID (defaults to new UUID)
-
-    Returns:
-        Optional[str]: The completion message if task completed successfully
-    """
-    thread_id = thread_id or str(uuid.uuid4())
-    logger.debug("Starting implementation agent with thread_id=%s", thread_id)
-    logger.debug(
-        "Implementation configuration: expert=%s, web=%s",
-        expert_enabled,
-        web_research_enabled,
-    )
-    logger.debug("Task details: base_task=%s, current_task=%s", base_task, task)
-    logger.debug("Related files: %s", related_files)
-
-    if memory is None:
-        memory = MemorySaver()
-
-    if thread_id is None:
-        thread_id = str(uuid.uuid4())
-
-    tools = get_implementation_tools(
-        expert_enabled=expert_enabled,
-        web_research_enabled=config.get("web_research_enabled", False),
-    )
-
-    agent = create_agent(model, tools, checkpointer=memory, agent_type="planner")
-
-    current_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    working_directory = os.getcwd()
-
-    # Make sure key_facts is defined before using it
-    try:
-        key_facts = format_key_facts_dict(get_key_fact_repository().get_facts_dict())
-    except RuntimeError as e:
-        logger.error(f"Failed to access key fact repository: {str(e)}")
-        key_facts = ""
-        
-    # Get formatted research notes using repository
-    try:
-        repository = get_research_note_repository()
-        notes_dict = repository.get_notes_dict()
-        formatted_research_notes = format_research_notes_dict(notes_dict)
-    except RuntimeError as e:
-        logger.error(f"Failed to access research note repository: {str(e)}")
-        formatted_research_notes = ""
-        
-    prompt = IMPLEMENTATION_PROMPT.format(
-        current_date=current_date,
-        working_directory=working_directory,
-        base_task=base_task,
-        task=task,
-        tasks=tasks,
-        plan=plan,
-        related_files=related_files,
-        key_facts=key_facts,
-        key_snippets=format_key_snippets_dict(get_key_snippet_repository().get_snippets_dict()),
-        research_notes=formatted_research_notes,
-        work_log=get_work_log_repository().format_work_log(),
-        expert_section=EXPERT_PROMPT_SECTION_IMPLEMENTATION if expert_enabled else "",
-        human_section=(
-            HUMAN_PROMPT_SECTION_IMPLEMENTATION
-            if get_config_repository().get("hil", False)
-            else ""
-        ),
-        web_research_section=(
-            WEB_RESEARCH_PROMPT_SECTION_CHAT
-            if config.get("web_research_enabled")
-            else ""
-        ),
-    )
-
-    config = get_config_repository().get_all() if not config else config
-    recursion_limit = config.get("recursion_limit", DEFAULT_RECURSION_LIMIT)
-    run_config = {
-        "configurable": {"thread_id": thread_id},
-        "recursion_limit": recursion_limit,
-    }
-    if config:
-        run_config.update(config)
-
-    try:
-        logger.debug("Implementation agent completed successfully")
-        none_or_fallback_handler = init_fallback_handler(agent, config, tools)
-        _result = run_agent_with_retry(
-            agent, prompt, run_config, none_or_fallback_handler
-        )
-        if _result:
-            # Log task implementation completion
-            log_work_event(f"Completed implementation of task: {task}")
-        return _result
-    except (KeyboardInterrupt, AgentInterrupt):
-        raise
-    except Exception as e:
-        logger.error("Implementation agent failed: %s", str(e), exc_info=True)
-        raise
+from ra_aid.agents.research_agent import run_research_agent, run_web_research_agent
+from ra_aid.agents.implementation_agent import run_task_implementation_agent
 
 
 _CONTEXT_STACK = []
@@ -910,6 +419,8 @@ def reset_agent_completion_flags():
 
 
 def _execute_test_command_wrapper(original_prompt, config, test_attempts, auto_test):
+    # For backwards compatibility, allow passing of config directly
+    # No need to get config from repository as it's passed in
     return execute_test_command(config, original_prompt, test_attempts, auto_test)
 
 
@@ -917,32 +428,56 @@ def _handle_api_error(e, attempt, max_retries, base_delay):
     # 1. Check if this is a ValueError with 429 code or rate limit phrases
     if isinstance(e, ValueError):
         error_str = str(e).lower()
-        rate_limit_phrases = ["429", "rate limit", "too many requests", "quota exceeded"]
-        if "code" not in error_str and not any(phrase in error_str for phrase in rate_limit_phrases):
+        rate_limit_phrases = [
+            "429",
+            "rate limit",
+            "too many requests",
+            "quota exceeded",
+        ]
+        if "code" not in error_str and not any(
+            phrase in error_str for phrase in rate_limit_phrases
+        ):
             raise e
-    
+
     # 2. Check for status_code or http_status attribute equal to 429
-    if hasattr(e, 'status_code') and e.status_code == 429:
+    if hasattr(e, "status_code") and e.status_code == 429:
         pass  # This is a rate limit error, continue with retry logic
-    elif hasattr(e, 'http_status') and e.http_status == 429:
+    elif hasattr(e, "http_status") and e.http_status == 429:
         pass  # This is a rate limit error, continue with retry logic
     # 3. Check for rate limit phrases in error message
     elif isinstance(e, Exception) and not isinstance(e, ValueError):
         error_str = str(e).lower()
-        if not any(phrase in error_str for phrase in ["rate limit", "too many requests", "quota exceeded", "429"]) and not ("rate" in error_str and "limit" in error_str):
+        if not any(
+            phrase in error_str
+            for phrase in ["rate limit", "too many requests", "quota exceeded", "429"]
+        ) and not ("rate" in error_str and "limit" in error_str):
             # This doesn't look like a rate limit error, but we'll still retry other API errors
             pass
-    
+
     # Apply common retry logic for all identified errors
     if attempt == max_retries - 1:
         logger.error("Max retries reached, failing: %s", str(e))
         raise RuntimeError(f"Max retries ({max_retries}) exceeded. Last error: {e}")
-    
+
     logger.warning("API error (attempt %d/%d): %s", attempt + 1, max_retries, str(e))
     delay = base_delay * (2**attempt)
-    print_error(
-        f"Encountered {e.__class__.__name__}: {e}. Retrying in {delay}s... (Attempt {attempt+1}/{max_retries})"
+    error_message = f"Encountered {e.__class__.__name__}: {e}. Retrying in {delay}s... (Attempt {attempt+1}/{max_retries})"
+    
+    # Record error in trajectory
+    trajectory_repo = get_trajectory_repository()
+    human_input_id = get_human_input_repository().get_most_recent_id()
+    trajectory_repo.create(
+        step_data={
+            "error_message": error_message,
+            "display_title": "Error",
+        },
+        record_type="error",
+        human_input_id=human_input_id,
+        is_error=True,
+        error_message=error_message
     )
+    
+    print_error(error_message)
     start = time.monotonic()
     while time.monotonic() - start < delay:
         check_interrupt()
@@ -961,15 +496,15 @@ def get_agent_type(agent: RAgents) -> Literal["CiaynAgent", "React"]:
         return "React"
 
 
-def init_fallback_handler(agent: RAgents, config: Dict[str, Any], tools: List[Any]):
+def init_fallback_handler(agent: RAgents, tools: List[Any]):
     """
     Initialize fallback handler if agent is of type "React" and experimental_fallback_handler is enabled; otherwise return None.
     """
-    if not config.get("experimental_fallback_handler", False):
+    if not get_config_repository().get("experimental_fallback_handler", False):
         return None
     agent_type = get_agent_type(agent)
     if agent_type == "React":
-        return FallbackHandler(config, tools)
+        return FallbackHandler(get_config_repository().get_all(), tools)
     return None
 
 
@@ -991,133 +526,84 @@ def _handle_fallback_response(
         msg_list.extend(msg_list_response)
 
 
-# def _run_agent_stream(agent: RAgents, msg_list: list[BaseMessage], config: dict):
-#     for chunk in agent.stream({"messages": msg_list}, config):
-#         logger.debug("Agent output: %s", chunk)
-#         check_interrupt()
-#         agent_type = get_agent_type(agent)
-#         print_agent_output(chunk, agent_type)
-#         if is_completed() or should_exit():
-#             reset_completion_flags()
-#             break
-# def _run_agent_stream(agent: RAgents, msg_list: list[BaseMessage], config: dict):
-#     while True: ##  WE NEED TO ONLY KEEP ITERATING IF IT IS AN INTERRUPT, NOT UNCONDITIONALLY 
-#         stream = agent.stream({"messages": msg_list}, config)
-#         for chunk in stream:
-#             logger.debug("Agent output: %s", chunk)
-#             check_interrupt()
-#             agent_type = get_agent_type(agent)
-#             print_agent_output(chunk, agent_type)
-#             if is_completed() or should_exit():
-#                 reset_completion_flags()
-#                 return True
-#         print("HERE!")
-
-# def _run_agent_stream(agent: RAgents, msg_list: list[BaseMessage], config: dict):
-#     while True:
-#         for chunk in agent.stream({"messages": msg_list}, config):
-#             print("Chunk received:", chunk)
-#             check_interrupt()
-#             agent_type = get_agent_type(agent)
-#             print_agent_output(chunk, agent_type)
-#             if is_completed() or should_exit():
-#                 reset_completion_flags()
-#                 return True
-#         print("HERE!")
-#         print("Config passed to _run_agent_stream:", config)
-#         print("Config keys:", list(config.keys()))
-        
-#         # Ensure the configuration for state retrieval contains a 'configurable' key.
-#         state_config = config.copy()
-#         if "configurable" not in state_config:
-#             print("Key 'configurable' not found in config. Adding it as an empty dict.")
-#             state_config["configurable"] = {}
-#         print("Using state_config for agent.get_state():", state_config)
-        
-#         try:
-#             state = agent.get_state(state_config)
-#             print("Agent state retrieved:", state)
-#             print("State type:", type(state))
-#             print("State attributes:", dir(state))
-#         except Exception as e:
-#             print("Error retrieving agent state with state_config", state_config, ":", e)
-#             raise
-        
-#         # Since state.current is not available, we rely solely on state.next.
-#         try:
-#             next_node = state.next
-#             print("State next value:", next_node)
-#         except Exception as e:
-#             print("Error accessing state.next:", e)
-#             next_node = None
-        
-#         # Resume execution if state.next is truthy (indicating further steps remain).
-#         if next_node:
-#             print("Resuming execution because state.next is nonempty:", next_node)
-#             agent.invoke(None, config)
-#             continue
-#         else:
-#             print("No further steps indicated; breaking out of loop.")
-#             break
-
-#     return True
-
-
-def _run_agent_stream(agent: RAgents, msg_list: list[BaseMessage], config: dict):
+def _run_agent_stream(agent: RAgents, msg_list: list[BaseMessage]):
     """
     Streams agent output while handling completion and interruption.
-    
+
     For each chunk, it logs the output, calls check_interrupt(), prints agent output,
     and then checks if is_completed() or should_exit() are true. If so, it resets completion
     flags and returns. After finishing a stream iteration (i.e. the for-loop over chunks),
     the function retrieves the agent's state. If the state indicates further steps (i.e. state.next is non-empty),
     it resumes execution via agent.invoke(None, config); otherwise, it exits the loop.
-    
+
     This function adheres to the latest LangGraph best practices (as of March 2025) for handling
     human-in-the-loop interruptions using interrupt_after=["tools"].
     """
+    config = get_config_repository().get_all()
+    stream_config = config.copy()
+
+    cb = None
+    if is_anthropic_claude(config):
+        model_name = config.get("model", "")
+        full_model_name = model_name
+        cb = AnthropicCallbackHandler(full_model_name)
+
+        if "callbacks" not in stream_config:
+            stream_config["callbacks"] = []
+        stream_config["callbacks"].append(cb)
+
     while True:
-        # Process each chunk from the agent stream.
-        for chunk in agent.stream({"messages": msg_list}, config):
+        for chunk in agent.stream({"messages": msg_list}, stream_config):
             logger.debug("Agent output: %s", chunk)
             check_interrupt()
             agent_type = get_agent_type(agent)
-            print_agent_output(chunk, agent_type)
+            print_agent_output(chunk, agent_type, cost_cb=cb)
+
             if is_completed() or should_exit():
                 reset_completion_flags()
-                return True  # Exit immediately when finished or signaled to exit.
+                if cb:
+                    logger.debug(f"AnthropicCallbackHandler:\n{cb}")
+                return True
+
         logger.debug("Stream iteration ended; checking agent state for continuation.")
-        
+
         # Prepare state configuration, ensuring 'configurable' is present.
-        state_config = config.copy()
+        state_config = get_config_repository().get_all().copy()
         if "configurable" not in state_config:
-            logger.debug("Key 'configurable' not found in config; adding it as an empty dict.")
+            logger.debug(
+                "Key 'configurable' not found in config; adding it as an empty dict."
+            )
             state_config["configurable"] = {}
         logger.debug("Using state_config for agent.get_state(): %s", state_config)
-        
+
         try:
             state = agent.get_state(state_config)
             logger.debug("Agent state retrieved: %s", state)
         except Exception as e:
-            logger.error("Error retrieving agent state with state_config %s: %s", state_config, e)
+            logger.error(
+                "Error retrieving agent state with state_config %s: %s", state_config, e
+            )
             raise
-        
-        # If the state indicates that further steps remain (i.e. state.next is non-empty),
-        # then resume execution by invoking the agent with no new input.
+
         if state.next:
-            logger.debug("State indicates continuation (state.next: %s); resuming execution.", state.next)
-            agent.invoke(None, config)
+            logger.debug(
+                "State indicates continuation (state.next: %s); resuming execution.",
+                state.next,
+            )
+            agent.invoke(None, stream_config)
             continue
         else:
             logger.debug("No continuation indicated in state; exiting stream loop.")
             break
 
+    if cb:
+        logger.debug(f"AnthropicCallbackHandler:\n{cb}")
     return True
+
 
 def run_agent_with_retry(
     agent: RAgents,
     prompt: str,
-    config: dict,
     fallback_handler: Optional[FallbackHandler] = None,
 ) -> Optional[str]:
     """Run an agent with retry logic for API errors."""
@@ -1126,10 +612,13 @@ def run_agent_with_retry(
     max_retries = 20
     base_delay = 1
     test_attempts = 0
-    _max_test_retries = config.get("max_test_cmd_retries", DEFAULT_MAX_TEST_CMD_RETRIES)
-    auto_test = config.get("auto_test", False)
+    _max_test_retries = get_config_repository().get(
+        "max_test_cmd_retries", DEFAULT_MAX_TEST_CMD_RETRIES
+    )
+    auto_test = get_config_repository().get("auto_test", False)
     original_prompt = prompt
     msg_list = [HumanMessage(content=prompt)]
+    run_config = get_config_repository().get_all()
 
     # Create a new agent context for this run
     with InterruptibleSection(), agent_context() as ctx:
@@ -1147,12 +636,12 @@ def run_agent_with_retry(
                     return f"Agent has crashed: {crash_message}"
 
                 try:
-                    _run_agent_stream(agent, msg_list, config)
+                    _run_agent_stream(agent, msg_list)
                     if fallback_handler:
                         fallback_handler.reset_fallback_handler()
                     should_break, prompt, auto_test, test_attempts = (
                         _execute_test_command_wrapper(
-                            original_prompt, config, test_attempts, auto_test
+                            original_prompt, run_config, test_attempts, auto_test
                         )
                     )
                     if should_break:

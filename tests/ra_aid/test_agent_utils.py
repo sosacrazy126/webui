@@ -63,6 +63,42 @@ def mock_config_repository():
         yield mock_repo
 
 
+@pytest.fixture(autouse=True)
+def mock_trajectory_repository():
+    """Mock the TrajectoryRepository to avoid database operations during tests"""
+    with patch('ra_aid.database.repositories.trajectory_repository.trajectory_repo_var') as mock_repo_var:
+        # Setup a mock repository
+        mock_repo = MagicMock()
+        
+        # Setup create method to return a mock trajectory
+        def mock_create(**kwargs):
+            mock_trajectory = MagicMock()
+            mock_trajectory.id = 1
+            return mock_trajectory
+        mock_repo.create.side_effect = mock_create
+        
+        # Make the mock context var return our mock repo
+        mock_repo_var.get.return_value = mock_repo
+        
+        yield mock_repo
+
+
+@pytest.fixture(autouse=True)
+def mock_human_input_repository():
+    """Mock the HumanInputRepository to avoid database operations during tests"""
+    with patch('ra_aid.database.repositories.human_input_repository.human_input_repo_var') as mock_repo_var:
+        # Setup a mock repository
+        mock_repo = MagicMock()
+        
+        # Setup get_most_recent_id method to return a dummy ID
+        mock_repo.get_most_recent_id.return_value = 1
+        
+        # Make the mock context var return our mock repo
+        mock_repo_var.get.return_value = mock_repo
+        
+        yield mock_repo
+
+
 def test_get_model_token_limit_anthropic(mock_config_repository):
     """Test get_model_token_limit with Anthropic model."""
     config = {"provider": "anthropic", "model": "claude2"}
@@ -370,7 +406,7 @@ def test_agent_context_depth():
                 assert ctx3.depth == 2
 
 
-def test_run_agent_stream(monkeypatch):
+def test_run_agent_stream(monkeypatch, mock_config_repository):
     from ra_aid.agent_utils import _run_agent_stream
 
     # Create a simple state class with a next property
@@ -397,14 +433,14 @@ def test_run_agent_stream(monkeypatch):
     call_flag = {"called": False}
 
     def fake_print_agent_output(
-        chunk: Dict[str, Any], agent_type: Literal["CiaynAgent", "React"]
+        chunk: Dict[str, Any], agent_type: Literal["CiaynAgent", "React"], cost_cb=None
     ):
         call_flag["called"] = True
 
     monkeypatch.setattr(
         "ra_aid.agent_utils.print_agent_output", fake_print_agent_output
     )
-    _run_agent_stream(dummy_agent, [HumanMessage("dummy prompt")], {})
+    _run_agent_stream(dummy_agent, [HumanMessage("dummy prompt")])
     assert call_flag["called"]
 
     with agent_context() as ctx:
@@ -530,7 +566,7 @@ def test_is_anthropic_claude():
     )  # Wrong provider
 
 
-def test_run_agent_with_retry_checks_crash_status(monkeypatch):
+def test_run_agent_with_retry_checks_crash_status(monkeypatch, mock_config_repository):
     """Test that run_agent_with_retry checks for crash status at the beginning of each iteration."""
     from ra_aid.agent_context import agent_context, mark_agent_crashed
     from ra_aid.agent_utils import run_agent_with_retry
@@ -593,7 +629,7 @@ def test_run_agent_with_retry_checks_crash_status(monkeypatch):
         assert "Agent has crashed: Test crash message" in result
 
 
-def test_run_agent_with_retry_handles_badrequest_error(monkeypatch):
+def test_run_agent_with_retry_handles_badrequest_error(monkeypatch, mock_config_repository):
     """Test that run_agent_with_retry properly handles BadRequestError as unretryable."""
     from ra_aid.agent_context import agent_context, is_crashed
     from ra_aid.agent_utils import run_agent_with_retry
@@ -651,7 +687,7 @@ def test_run_agent_with_retry_handles_badrequest_error(monkeypatch):
         assert is_crashed()
 
 
-def test_run_agent_with_retry_handles_api_badrequest_error(monkeypatch):
+def test_run_agent_with_retry_handles_api_badrequest_error(monkeypatch, mock_config_repository):
     """Test that run_agent_with_retry properly handles API BadRequestError as unretryable."""
     # Import APIError from anthropic module and patch it on the agent_utils module
 

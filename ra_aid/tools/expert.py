@@ -9,6 +9,9 @@ from rich.panel import Panel
 
 logger = logging.getLogger(__name__)
 
+from ..database.repositories.trajectory_repository import get_trajectory_repository
+from ..database.repositories.human_input_repository import get_human_input_repository
+
 from ..database.repositories.key_fact_repository import get_key_fact_repository
 from ..database.repositories.key_snippet_repository import get_key_snippet_repository
 from ..database.repositories.related_files_repository import get_related_files_repository
@@ -19,7 +22,7 @@ from ..model_formatters import format_key_facts_dict
 from ..model_formatters.key_snippets_formatter import format_key_snippets_dict
 from ..model_formatters.research_notes_formatter import format_research_notes_dict
 from ..models_params import models_params
-from ..text import extract_think_tag
+from ..text.processing import process_thinking_content
 
 console = Console()
 _model = None
@@ -71,6 +74,23 @@ def emit_expert_context(context: str) -> str:
         context: The context to add
     """
     expert_context["text"].append(context)
+
+    # Record expert context in trajectory
+    try:
+        trajectory_repo = get_trajectory_repository()
+        human_input_id = get_human_input_repository().get_most_recent_id()
+        trajectory_repo.create(
+            tool_name="emit_expert_context",
+            tool_parameters={"context_length": len(context)},
+            step_data={
+                "display_title": "Expert Context",
+                "context_length": len(context),
+            },
+            record_type="tool_execution",
+            human_input_id=human_input_id
+        )
+    except Exception as e:
+        logger.error(f"Failed to record trajectory: {e}")
 
     # Create and display status panel
     panel_content = f"Added expert context ({len(context)} characters)"
@@ -184,6 +204,23 @@ def ask_expert(question: str) -> str:
     # Build display query (just question)
     display_query = "# Question\n" + question
 
+    # Record expert query in trajectory
+    try:
+        trajectory_repo = get_trajectory_repository()
+        human_input_id = get_human_input_repository().get_most_recent_id()
+        trajectory_repo.create(
+            tool_name="ask_expert",
+            tool_parameters={"question": question},
+            step_data={
+                "display_title": "Expert Query",
+                "question": question,
+            },
+            record_type="tool_execution",
+            human_input_id=human_input_id
+        )
+    except Exception as e:
+        logger.error(f"Failed to record trajectory: {e}")
+
     # Show only question in panel
     console.print(
         Panel(Markdown(display_query), title="🤔 Expert Query", border_style="yellow")
@@ -247,60 +284,39 @@ def ask_expert(question: str) -> str:
     logger.debug(f"Model supports think tag: {supports_think_tag}")
     logger.debug(f"Model supports thinking: {supports_thinking}")
     
-    # Handle thinking mode responses (content is a list) or regular responses (content is a string)
+    # Process thinking content using the common processing function
     try:
-        # Case 1: Check for think tags if the model supports them
-        if (supports_think_tag or supports_thinking) and isinstance(content, str):
-            logger.debug("Checking for think tags in expert response")
-            think_content, remaining_text = extract_think_tag(content)
-            if think_content:
-                logger.debug(f"Found think tag content ({len(think_content)} chars)")
-                if get_config_repository().get("show_thoughts", False):
-                    console.print(
-                        Panel(Markdown(think_content), title="💭 Thoughts", border_style="yellow")
-                    )
-                content = remaining_text
-            else:
-                logger.debug("No think tag content found in expert response")
-        
-        # Case 2: Handle structured thinking (content is a list of dictionaries)
-        elif isinstance(content, list):
-            logger.debug("Expert response content is a list, processing structured thinking")
-            # Extract thinking content and response text from structured response
-            thinking_content = None
-            response_text = None
-            
-            # Process each item in the list
-            for item in content:
-                if isinstance(item, dict):
-                    # Extract thinking content
-                    if item.get('type') == 'thinking' and 'thinking' in item:
-                        thinking_content = item['thinking']
-                        logger.debug("Found structured thinking content")
-                    # Extract response text
-                    elif item.get('type') == 'text' and 'text' in item:
-                        response_text = item['text']
-                        logger.debug("Found structured response text")
-            
-            # Display thinking content in a separate panel if available
-            if thinking_content and get_config_repository().get("show_thoughts", False):
-                logger.debug(f"Displaying structured thinking content ({len(thinking_content)} chars)")
-                console.print(
-                    Panel(Markdown(thinking_content), title="Expert Thinking", border_style="yellow")
-                )
-            
-            # Use response_text if available, otherwise fall back to joining
-            if response_text:
-                content = response_text
-            else:
-                # Fallback: join list items if structured extraction failed
-                logger.debug("No structured response text found, joining list items")
-                content = "\n".join(str(item) for item in content)
+        # Use the process_thinking_content function to handle both string and list responses
+        content, thinking = process_thinking_content(
+            content=content,
+            supports_think_tag=supports_think_tag,
+            supports_thinking=supports_thinking,
+            panel_title="💭 Thoughts",
+            panel_style="yellow",
+            logger=logger
+        )
         
     except Exception as e:
         logger.error(f"Exception during content processing: {str(e)}")
         raise
     
+    # Record expert response in trajectory
+    try:
+        trajectory_repo = get_trajectory_repository()
+        human_input_id = get_human_input_repository().get_most_recent_id()
+        trajectory_repo.create(
+            tool_name="ask_expert",
+            tool_parameters={"question": question},
+            step_data={
+                "display_title": "Expert Response",
+                "response_length": len(content),
+            },
+            record_type="tool_execution",
+            human_input_id=human_input_id
+        )
+    except Exception as e:
+        logger.error(f"Failed to record trajectory: {e}")
+
     # Format and display response
     console.print(
         Panel(Markdown(content), title="Expert Response", border_style="blue")

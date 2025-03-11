@@ -34,9 +34,9 @@ from ra_aid.version_check import check_for_newer_version
 from ra_aid.agent_utils import (
     create_agent,
     run_agent_with_retry,
-    run_planning_agent,
-    run_research_agent,
 )
+from ra_aid.agents.research_agent import run_research_agent
+from ra_aid.agents import run_planning_agent
 from ra_aid.config import (
     DEFAULT_MAX_TEST_CMD_RETRIES,
     DEFAULT_RECURSION_LIMIT,
@@ -53,6 +53,9 @@ from ra_aid.database.repositories.human_input_repository import (
 from ra_aid.database.repositories.research_note_repository import (
     ResearchNoteRepositoryManager, get_research_note_repository
 )
+from ra_aid.database.repositories.trajectory_repository import (
+    TrajectoryRepositoryManager, get_trajectory_repository
+)
 from ra_aid.database.repositories.related_files_repository import (
     RelatedFilesRepositoryManager
 )
@@ -63,6 +66,8 @@ from ra_aid.database.repositories.config_repository import (
     ConfigRepositoryManager,
     get_config_repository
 )
+from ra_aid.env_inv import EnvDiscovery
+from ra_aid.env_inv_context import EnvInvManager, get_env_inv
 from ra_aid.model_formatters import format_key_facts_dict
 from ra_aid.model_formatters.key_snippets_formatter import format_key_snippets_dict
 from ra_aid.console.output import cpm
@@ -285,6 +290,16 @@ Examples:
         action="store_true",
         help="Display model thinking content extracted from think tags when supported by the model",
     )
+    parser.add_argument(
+        "--reasoning-assistance",
+        action="store_true",
+        help="Force enable reasoning assistance regardless of model defaults",
+    )
+    parser.add_argument(
+        "--no-reasoning-assistance",
+        action="store_true",
+        help="Force disable reasoning assistance regardless of model defaults",
+    )
     if args is None:
         args = sys.argv[1:]
     parsed_args = parser.parse_args(args)
@@ -506,21 +521,30 @@ def main():
             config = {}
             
             # Initialize repositories with database connection
+            # Create environment inventory data
+            env_discovery = EnvDiscovery()
+            env_discovery.discover()
+            env_data = env_discovery.format_markdown()
+            
             with KeyFactRepositoryManager(db) as key_fact_repo, \
                  KeySnippetRepositoryManager(db) as key_snippet_repo, \
                  HumanInputRepositoryManager(db) as human_input_repo, \
                  ResearchNoteRepositoryManager(db) as research_note_repo, \
                  RelatedFilesRepositoryManager() as related_files_repo, \
+                 TrajectoryRepositoryManager(db) as trajectory_repo, \
                  WorkLogRepositoryManager() as work_log_repo, \
-                 ConfigRepositoryManager(config) as config_repo:
+                 ConfigRepositoryManager(config) as config_repo, \
+                 EnvInvManager(env_data) as env_inv:
                 # This initializes all repositories and makes them available via their respective get methods
                 logger.debug("Initialized KeyFactRepository")
                 logger.debug("Initialized KeySnippetRepository")
                 logger.debug("Initialized HumanInputRepository")
                 logger.debug("Initialized ResearchNoteRepository")
                 logger.debug("Initialized RelatedFilesRepository")
+                logger.debug("Initialized TrajectoryRepository")
                 logger.debug("Initialized WorkLogRepository")
                 logger.debug("Initialized ConfigRepository")
+                logger.debug("Initialized Environment Inventory")
 
                 # Check dependencies before proceeding
                 check_dependencies()
@@ -569,6 +593,8 @@ def main():
                 config_repo.set("experimental_fallback_handler", args.experimental_fallback_handler)
                 config_repo.set("web_research_enabled", web_research_enabled)
                 config_repo.set("show_thoughts", args.show_thoughts)
+                config_repo.set("force_reasoning_assistance", args.reasoning_assistance)
+                config_repo.set("disable_reasoning_assistance", args.no_reasoning_assistance)
 
                 # Build status panel with memory statistics
                 status = build_status()
@@ -590,10 +616,40 @@ def main():
                     )
 
                     if args.research_only:
+                        try:
+                            trajectory_repo = get_trajectory_repository()
+                            human_input_id = get_human_input_repository().get_most_recent_id()
+                            error_message = "Chat mode cannot be used with --research-only"
+                            trajectory_repo.create(
+                                step_data={
+                                    "display_title": "Error",
+                                    "error_message": error_message,
+                                },
+                                record_type="error",
+                                human_input_id=human_input_id,
+                                is_error=True,
+                                error_message=error_message,
+                            )
+                        except Exception as traj_error:
+                            # Swallow exception to avoid recursion
+                            logger.debug(f"Error recording trajectory: {traj_error}")
+                            pass
                         print_error("Chat mode cannot be used with --research-only")
                         sys.exit(1)
 
                     print_stage_header("Chat Mode")
+                    
+                    # Record stage transition in trajectory
+                    trajectory_repo = get_trajectory_repository()
+                    human_input_id = get_human_input_repository().get_most_recent_id()
+                    trajectory_repo.create(
+                        step_data={
+                            "stage": "chat_mode",
+                            "display_title": "Chat Mode",
+                        },
+                        record_type="stage_transition",
+                        human_input_id=human_input_id
+                    )
 
                     # Get project info
                     try:
@@ -642,6 +698,8 @@ def main():
                     config_repo.set("expert_model", args.expert_model)
                     config_repo.set("temperature", args.temperature)
                     config_repo.set("show_thoughts", args.show_thoughts)
+                    config_repo.set("force_reasoning_assistance", args.reasoning_assistance)
+                    config_repo.set("disable_reasoning_assistance", args.no_reasoning_assistance)
 
                     # Set modification tools based on use_aider flag
                     set_modification_tools(args.use_aider)
@@ -671,6 +729,7 @@ def main():
                             key_facts=format_key_facts_dict(get_key_fact_repository().get_facts_dict()),
                             key_snippets=format_key_snippets_dict(get_key_snippet_repository().get_snippets_dict()),
                             project_info=formatted_project_info,
+                            env_inv=get_env_inv(),
                         ),
                         config,
                     )
@@ -678,6 +737,24 @@ def main():
 
                 # Validate message is provided
                 if not args.message:
+                    try:
+                        trajectory_repo = get_trajectory_repository()
+                        human_input_id = get_human_input_repository().get_most_recent_id()
+                        error_message = "--message is required"
+                        trajectory_repo.create(
+                            step_data={
+                                "display_title": "Error",
+                                "error_message": error_message,
+                            },
+                            record_type="error",
+                            human_input_id=human_input_id,
+                            is_error=True,
+                            error_message=error_message,
+                        )
+                    except Exception as traj_error:
+                        # Swallow exception to avoid recursion
+                        logger.debug(f"Error recording trajectory: {traj_error}")
+                        pass
                     print_error("--message is required")
                     sys.exit(1)
 
@@ -730,12 +807,28 @@ def main():
 
                 # Store temperature in config
                 config_repo.set("temperature", args.temperature)
+                
+                # Store reasoning assistance flags
+                config_repo.set("force_reasoning_assistance", args.reasoning_assistance)
+                config_repo.set("disable_reasoning_assistance", args.no_reasoning_assistance)
 
                 # Set modification tools based on use_aider flag
                 set_modification_tools(args.use_aider)
 
                 # Run research stage
                 print_stage_header("Research Stage")
+                
+                # Record stage transition in trajectory
+                trajectory_repo = get_trajectory_repository()
+                human_input_id = get_human_input_repository().get_most_recent_id()
+                trajectory_repo.create(
+                    step_data={
+                        "stage": "research_stage",
+                        "display_title": "Research Stage",
+                    },
+                    record_type="stage_transition",
+                    human_input_id=human_input_id
+                )
 
                 # Initialize research model with potential overrides
                 research_provider = args.research_provider or args.provider
@@ -751,7 +844,6 @@ def main():
                     research_only=args.research_only,
                     hil=args.hil,
                     memory=research_memory,
-                    config=config,
                 )
 
                 # for how long have we had a second planning agent triggered here?

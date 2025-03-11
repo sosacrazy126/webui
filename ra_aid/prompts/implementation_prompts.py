@@ -13,6 +13,10 @@ from ra_aid.prompts.web_research_prompts import WEB_RESEARCH_PROMPT_SECTION_IMPL
 IMPLEMENTATION_PROMPT = """Current Date: {current_date}
 Working Directory: {working_directory}
 
+<project info>
+{project_info}
+</project info>
+
 <key facts>
 {key_facts}
 </key facts>
@@ -28,6 +32,18 @@ Working Directory: {working_directory}
 <research notes>
 {research_notes}
 </research notes>
+
+<environment inventory>
+{env_inv}
+</environment inventory>
+
+MAKE USE OF THE ENVIRONMENT INVENTRY TO GET YOUR WORK DONE AS EFFICIENTLY AND ACCURATELY AS POSSIBLE
+
+E.G. IF WE ARE USING A LIBRARY AND IT IS FOUND IN ENV INVENTORY, ADD THE INCLUDE/LINKER FLAGS TO YOUR MAKEFILE/CMAKELISTS/COMPILATION COMMAND/ETC.
+
+YOU MUST **EXPLICITLY** INCLUDE ANY PATHS FROM THE ABOVE INFO IF NEEDED. IT IS NOT AUTOMATIC.
+
+READ AND STUDY ACTUAL LIBRARY HEADERS/CODE FROM THE ENVIRONMENT, IF AVAILABLE AND RELEVANT.
 
 Important Notes:
 - Focus solely on the given task and implement it as described.
@@ -74,5 +90,9 @@ FOLLOW TEST DRIVEN DEVELOPMENT (TDD) PRACTICES WHERE POSSIBE. E.G. COMPILE CODE 
 
 IF YOU CAN SEE THE CODE WRITTEN/CHANGED BY THE PROGRAMMER, TRUST IT. YOU DO NOT NEED TO RE-READ EVERY FILE WITH EVERY SMALL EDIT.
 
+YOU MUST READ FILES BEFORE WRITING OR CHANGING THEM.
+
 NEVER ANNOUNCE WHAT YOU ARE DOING, JUST DO IT!
+
+{implementation_guidance_section}
 """
