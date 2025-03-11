@@ -91,7 +91,7 @@ jobs:
           python -m venv .venv
           source .venv/bin/activate
           pip install --upgrade pip
-          pip install ra-aid homebrew-pypi-poet
+          pip install homebrew-pypi-poet ra-aid==${{ env.version }} 
 
       - name: Clone homebrew-ra-aid repository
         run: |
@@ -100,15 +100,19 @@ jobs:
 
       - name: Generate Brew Formula with poet
         run: |
+          source .venv/bin/activate
           cd homebrew-ra-aid
           poet -f ra-aid > Formula/ra-aid.rb
 
       - name: Update Formula/ra-aid.rb
         run: |
           cd homebrew-ra-aid
+          # --- Class documentaion
+          sed -i '' '1s/^/# Homebrew formula for RA.Aid\n/' Formula/ra-aid.rb
           # --- Update description and homepage ---
           sed -i '' 's/desc "Shiny new formula"/desc "RA.Aid (pronounced \\\"raid\\\") helps you develop software autonomously"/' Formula/ra-aid.rb
-          sed -i '' 's/homepage "None"/homepage "https:\/\/github.com\/ai-christianson\/RA.Aid"/' Formula/ra-aid.rb
+          sed -i '' 's/homepage "None"/homepage "https:\/\/github.com\/ai-christianson\/RA.Aid"\
+          version "${{ env.version }}"/' Formula/ra-aid.rb
           
           # Insert the license line after the homepage line using awk
           awk '/homepage "https:\/\/github.com\/ai-christianson\/RA.Aid"/ {print; print "  license \"Apache-2.0\""; next} 1' Formula/ra-aid.rb > tmp && mv tmp Formula/ra-aid.rb
@@ -303,6 +307,11 @@ jobs:
              end
            end
           EOF
+
+      - name: Show updated Formula
+        run: |
+          cd homebrew-ra-aid
+          cat Formula/ra-aid.rb
 
 #      - name: Commit and push changes
 #        run: |
