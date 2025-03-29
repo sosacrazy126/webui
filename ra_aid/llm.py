@@ -1,5 +1,5 @@
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from langchain_anthropic import ChatAnthropic
 from langchain_core.language_models import BaseChatModel
@@ -304,7 +304,7 @@ def create_llm_client(
 
 
 def initialize_llm(
-    provider: str, model_name: str, temperature: float | None = None
+    provider: str, model_name: str, temperature: Optional[float] = None
 ) -> BaseChatModel:
     """Initialize a language model client based on the specified provider and model."""
     return create_llm_client(provider, model_name, temperature, is_expert=False)

@@ -1,5 +1,6 @@
 import json
 import re
+from typing import Any, Dict, List, Optional, Union
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -48,7 +49,7 @@ class FallbackHandler:
         self.tool_failure_consecutive_failures = 0
         self.failed_messages: list[BaseMessage] = []
         self.current_failing_tool_name = ""
-        self.current_tool_to_bind: None | BaseTool = None
+        self.current_tool_to_bind: Optional[BaseTool] = None
         self.msg_list: list[BaseMessage] = []
 
     def _format_model(self, m: dict) -> str:

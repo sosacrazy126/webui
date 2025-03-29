@@ -1,9 +1,20 @@
 class RAWebUI {
     constructor() {
         this.messageHistory = [];
+        this.clientId = this.generateClientId();
         this.setupElements();
         this.setupEventListeners();
         this.connectWebSocket();
+        this.currentPhase = null;
+    }
+
+    generateClientId() {
+        // Generate a random UUID for client identification
+        return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+            const r = Math.random() * 16 | 0;
+            const v = c === 'x' ? r : (r & 0x3 | 0x8);
+            return v.toString(16);
+        });
     }
 
     setupElements() {
@@ -12,6 +23,10 @@ class RAWebUI {
         this.chatMessages = document.getElementById('chat-messages');
         this.streamOutput = document.getElementById('stream-output');
         this.historyList = document.getElementById('history-list');
+        this.statusIndicator = document.createElement('div');
+        this.statusIndicator.className = 'status-indicator';
+        this.statusIndicator.textContent = 'Connecting...';
+        this.chatMessages.appendChild(this.statusIndicator);
     }
 
     setupEventListeners() {
@@ -26,12 +41,12 @@ class RAWebUI {
 
     async connectWebSocket() {
         try {
-            // Get the server port from the response header or default to 8080
-            const serverPort = document.querySelector('meta[name="server-port"]')?.content || '8080';
+            // Get the server port from the response header or default to 8000
+            const serverPort = document.querySelector('meta[name="server-port"]')?.content || '8000';
             
-            // Construct WebSocket URL using the server port
+            // Construct WebSocket URL using the server port and client ID
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsUrl = `${protocol}//${window.location.hostname}:${serverPort}/ws`;
+            const wsUrl = `${protocol}//${window.location.hostname}:${serverPort}/ws/${this.clientId}`;
             console.log('Attempting to connect to WebSocket URL:', wsUrl);
             
             console.log('Creating new WebSocket connection...');
@@ -39,18 +54,23 @@ class RAWebUI {
             
             this.ws.onopen = () => {
                 console.log('WebSocket connection established successfully');
-                console.log('Connected to WebSocket server');
+                this.statusIndicator.textContent = 'Connected';
+                this.statusIndicator.className = 'status-indicator connected';
                 this.sendButton.disabled = false;
             };
 
             this.ws.onclose = () => {
                 console.log('Disconnected from WebSocket server');
+                this.statusIndicator.textContent = 'Disconnected. Reconnecting...';
+                this.statusIndicator.className = 'status-indicator disconnected';
                 this.sendButton.disabled = true;
                 setTimeout(() => this.connectWebSocket(), 5000);
             };
 
             this.ws.onerror = (error) => {
                 console.error('WebSocket error:', error);
+                this.statusIndicator.textContent = 'Connection error';
+                this.statusIndicator.className = 'status-indicator error';
             };
 
             this.ws.onmessage = (event) => {
@@ -59,19 +79,123 @@ class RAWebUI {
             };
         } catch (error) {
             console.error('Failed to connect to WebSocket:', error);
+            this.statusIndicator.textContent = 'Connection failed. Retrying...';
+            this.statusIndicator.className = 'status-indicator error';
             setTimeout(() => this.connectWebSocket(), 5000);
         }
     }
 
     handleServerMessage(data) {
-        if (data.type === 'stream_start') {
-            this.streamOutput.textContent = '';
-            this.streamOutput.style.display = 'block';
-        } else if (data.type === 'stream_end') {
-            this.streamOutput.style.display = 'none';
-            this.addToHistory(data.request);
-        } else if (data.type === 'chunk') {
-            this.handleChunk(data.chunk);
+        console.log('Received message:', data);
+        
+        switch (data.type) {
+            case 'connection_established':
+                this.statusIndicator.textContent = `Connected (ID: ${data.client_id})`;
+                this.statusIndicator.className = 'status-indicator connected';
+                this.sendButton.disabled = false;
+                break;
+                
+            case 'task_received':
+                this.appendMessage(`Task received by server: ${data.content.task}`, 'info');
+                break;
+                
+            case 'phase_started':
+                this.currentPhase = data.phase;
+                this.appendMessage(`Starting phase: ${data.phase}`, 'phase');
+                this.updatePhaseIndicator(data.phase, 'in-progress');
+                break;
+                
+            case 'research_complete':
+            case 'planning_complete':
+            case 'implementation_complete':
+                const phase = data.type.replace('_complete', '');
+                this.appendMessage(`${phase.charAt(0).toUpperCase() + phase.slice(1)} complete`, 'phase');
+                this.updatePhaseIndicator(phase, 'complete');
+                if (data.content && Object.keys(data.content).length > 0) {
+                    const contentStr = JSON.stringify(data.content, null, 2);
+                    this.appendMessage(contentStr, 'system');
+                }
+                break;
+                
+            case 'task_complete':
+                this.appendMessage('Task completed successfully', 'success');
+                this.currentPhase = null;
+                this.sendButton.disabled = false;
+                break;
+                
+            case 'task_cancelled':
+                this.appendMessage('Task cancelled', 'info');
+                this.currentPhase = null;
+                this.sendButton.disabled = false;
+                break;
+                
+            case 'error':
+                this.appendMessage(`Error: ${data.content}`, 'error');
+                this.sendButton.disabled = false;
+                break;
+                
+            case 'config_updated':
+                this.appendMessage(`Configuration updated: ${JSON.stringify(data.content)}`, 'info');
+                break;
+                
+            // Legacy message types for backward compatibility
+            case 'stream_start':
+                this.streamOutput.textContent = '';
+                this.streamOutput.style.display = 'block';
+                break;
+                
+            case 'stream_end':
+                this.streamOutput.style.display = 'none';
+                this.addToHistory(data.request);
+                break;
+                
+            case 'chunk':
+                this.handleChunk(data.chunk);
+                break;
+                
+            default:
+                console.warn('Unknown message type:', data.type);
+                break;
+        }
+    }
+
+    updatePhaseIndicator(phase, status) {
+        // Remove any existing phase indicators
+        const existingIndicators = document.querySelectorAll('.phase-indicator');
+        existingIndicators.forEach(indicator => {
+            indicator.remove();
+        });
+        
+        // Create a new phase indicator
+        const indicator = document.createElement('div');
+        indicator.className = `phase-indicator ${status} ${phase}`;
+        indicator.innerHTML = `
+            <span class="phase-name">${phase}</span>
+            <span class="phase-status">${status}</span>
+        `;
+        
+        // Add a cancel button if the phase is in progress
+        if (status === 'in-progress') {
+            const cancelButton = document.createElement('button');
+            cancelButton.className = 'cancel-button';
+            cancelButton.textContent = 'Cancel';
+            cancelButton.addEventListener('click', () => this.cancelTask());
+            indicator.appendChild(cancelButton);
+        }
+        
+        this.chatMessages.appendChild(indicator);
+        this.chatMessages.scrollTop = this.chatMessages.scrollHeight;
+    }
+
+    cancelTask() {
+        if (!this.currentPhase) return;
+        
+        try {
+            this.ws.send(JSON.stringify({ type: 'cancel' }));
+            this.appendMessage('Cancelling task...', 'info');
+        } catch (error) {
+            console.error('Error sending cancel request:', error);
+            this.appendMessage(`Error cancelling task: ${error.message}`, 'error');
         }
     }
 
@@ -141,7 +265,9 @@ class RAWebUI {
         try {
             console.log('Sending message to server');
             this.appendMessage(message, 'user');
-            const payload = { type: 'request', content: message };
+            
+            // Use the 'task' message type for the enhanced server
+            const payload = { type: 'task', content: message };
             console.log('Payload:', payload);
             
             this.ws.send(JSON.stringify(payload));

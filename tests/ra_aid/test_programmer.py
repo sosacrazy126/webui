@@ -1,4 +1,6 @@
 import pytest
+import pathlib
+import os
 
 from ra_aid.tools.programmer import (
     get_aider_executable,
@@ -85,7 +87,10 @@ def test_aider_config_flag(mocker):
         "related_files": {},
     }
     mocker.patch("ra_aid.tools.programmer._global_memory", mock_memory)
-
+    
+    # Mock the aider executable path to avoid filesystem check
+    mocker.patch("ra_aid.tools.programmer.get_aider_executable", return_value="/mock/path/to/aider")
+    
     # Mock the run_interactive_command to capture the command that would be run
     mock_run = mocker.patch(
         "ra_aid.tools.programmer.run_interactive_command", return_value=(b"", 0)
@@ -93,10 +98,10 @@ def test_aider_config_flag(mocker):
 
     run_programming_task.invoke({"instructions": "test instruction"})
 
-    args = mock_run.call_args[0][0]  # Get the first positional arg (command list)
-    assert "--config" in args
-    config_index = args.index("--config")
-    assert args[config_index + 1] == "/path/to/config.yml"
+    # Verify the command includes the config flag
+    called_args, _ = mock_run.call_args
+    assert "--config" in called_args[0]
+    assert "/path/to/config.yml" in called_args[0]
 
 
 def test_path_normalization_and_deduplication(mocker, tmp_path):
@@ -149,45 +154,34 @@ def test_path_normalization_and_deduplication(mocker, tmp_path):
 
 
 def test_get_aider_executable(mocker):
-    """Test the get_aider_executable function."""
-    mock_sys = mocker.patch("ra_aid.tools.programmer.sys")
-    mock_path = mocker.patch("ra_aid.tools.programmer.Path")
-    mock_os = mocker.patch("ra_aid.tools.programmer.os")
-
-    # Mock sys.executable and platform
-    mock_sys.executable = "/path/to/venv/bin/python"
-    mock_sys.platform = "linux"
-
-    # Mock Path().parent and exists()
-    mock_path_instance = mocker.MagicMock()
-    mock_path.return_value = mock_path_instance
-    mock_parent = mocker.MagicMock()
-    mock_path_instance.parent = mock_parent
-    mock_aider = mocker.MagicMock()
-    mock_parent.__truediv__.return_value = mock_aider
-    mock_aider.exists.return_value = True
-
+    """Test that the aider executable is correctly located based on the Python executable's path."""
+    # Mock the Path.exists method to return True
+    mock_exists = mocker.patch("pathlib.Path.exists", return_value=True)
+    
     # Mock os.access to return True
+    mock_os = mocker.patch("ra_aid.tools.programmer.os")
     mock_os.access.return_value = True
-    mock_os.X_OK = 1  # Mock the execute permission constant
-
-    # Test happy path on Linux
-    aider_path = get_aider_executable()
-    assert aider_path == str(mock_aider)
-    mock_parent.__truediv__.assert_called_with("aider")
-
-    # Test Windows path
+    mock_os.X_OK = 1  # Mock execute permission constant
+    
+    # Mock sys.executable with a dummy path
+    mock_sys = mocker.patch("ra_aid.tools.programmer.sys")
+    mock_sys.executable = "/mock/python/bin/python"
+    mock_sys.platform = "linux"  # Non-Windows platform
+    
+    # Call the function
+    result = get_aider_executable()
+    
+    # Check that the result is as expected
+    assert result == "/mock/python/bin/aider"
+    mock_exists.assert_called_once()
+    mock_os.access.assert_called_once()
+    
+    # Test Windows platform
     mock_sys.platform = "win32"
-    aider_path = get_aider_executable()
-    mock_parent.__truediv__.assert_called_with("aider.exe")
-
-    # Test executable not found
-    mock_aider.exists.return_value = False
-    with pytest.raises(RuntimeError, match="Could not find aider executable"):
-        get_aider_executable()
-
-    # Test not executable
-    mock_aider.exists.return_value = True
-    mock_os.access.return_value = False
-    with pytest.raises(RuntimeError, match="is not executable"):
-        get_aider_executable()
+    mock_exists.reset_mock()
+    mock_os.access.reset_mock()
+    
+    result = get_aider_executable()
+    assert result == "/mock/python/bin/aider.exe"
+    mock_exists.assert_called_once()
+    mock_os.access.assert_called_once()

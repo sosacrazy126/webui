@@ -76,11 +76,58 @@
             .error-message {
                 @apply bg-red-900 text-red-100 mr-auto;
             }
+            .info-message {
+                @apply bg-blue-900 text-blue-100 mr-auto;
+            }
+            .success-message {
+                @apply bg-green-900 text-green-100 mr-auto;
+            }
+            .phase-message {
+                @apply bg-indigo-900 text-indigo-100 mr-auto font-semibold;
+            }
             .history-item {
                 @apply p-3 rounded-lg hover:bg-dark-primary cursor-pointer transition-colors duration-200 text-sm;
             }
             #stream-output:not(:empty) {
                 @apply block;
+            }
+            .status-indicator {
+                @apply mb-4 px-3 py-1 rounded-lg text-sm mr-auto font-semibold;
+                @apply bg-gray-700 text-gray-300;
+            }
+            .status-indicator.connected {
+                @apply bg-green-700 text-green-100;
+            }
+            .status-indicator.disconnected {
+                @apply bg-red-700 text-red-100;
+            }
+            .status-indicator.error {
+                @apply bg-red-900 text-red-100;
+            }
+            .phase-indicator {
+                @apply mb-4 p-3 rounded-lg w-full flex items-center justify-between;
+                @apply bg-gray-800 border-l-4;
+            }
+            .phase-indicator.research {
+                @apply border-blue-500;
+            }
+            .phase-indicator.planning {
+                @apply border-purple-500;
+            }
+            .phase-indicator.implementation {
+                @apply border-orange-500;
+            }
+            .phase-indicator.in-progress .phase-status {
+                @apply bg-yellow-600 text-yellow-100 px-2 py-0.5 rounded text-xs;
+            }
+            .phase-indicator.complete .phase-status {
+                @apply bg-green-600 text-green-100 px-2 py-0.5 rounded text-xs;
+            }
+            .phase-name {
+                @apply font-semibold;
+            }
+            .cancel-button {
+                @apply bg-red-600 text-white px-2 py-0.5 rounded text-xs hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500;
             }
         `;
         document.head.appendChild(style);

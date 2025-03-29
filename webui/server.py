@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 import argparse
 import asyncio
+import json
 import shutil
 import sys
+import uuid
 from pathlib import Path
-from typing import List
+from typing import Dict, List, Optional
 
 import uvicorn
+import websockets
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
@@ -39,148 +42,104 @@ templates = Jinja2Templates(directory=Path(__file__).parent)
 @app.get("/", response_class=HTMLResponse)
 async def get_root(request: Request):
     """Serve the index.html file with port parameter."""
+    # Default to enhanced server port (8000)
+    enhanced_server_port = 8000
     return templates.TemplateResponse(
-        "index.html", {"request": request, "server_port": request.url.port or 8080}
+        "index.html", {"request": request, "server_port": enhanced_server_port}
     )
 
 
 # Mount static files for js and other assets
 app.mount("/static", StaticFiles(directory=Path(__file__).parent), name="static")
 
-# Store WebSocket connections
+# Store active proxy connections
+proxy_connections: Dict[str, WebSocket] = {}
+enhanced_connections: Dict[str, websockets.WebSocketClientProtocol] = {}
 
-# Store active WebSocket connections
-active_connections: List[WebSocket] = []
 
-
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    print(f"New WebSocket connection from {websocket.client}")
+@app.websocket("/ws/{client_id}")
+async def websocket_endpoint(websocket: WebSocket, client_id: str):
+    """
+    WebSocket endpoint that proxies connections to the enhanced server.
+    
+    Args:
+        websocket: WebSocket connection from client
+        client_id: Client identifier
+    """
     await websocket.accept()
-    print("WebSocket connection accepted")
-    active_connections.append(websocket)
+    print(f"WebSocket connection accepted for client {client_id}")
+    
+    # Store client connection
+    proxy_connections[client_id] = websocket
+    
+    try:
+        # Connect to enhanced server
+        enhanced_server_url = f"ws://localhost:8000/ws/{client_id}"
+        print(f"Connecting to enhanced server at {enhanced_server_url}")
+        
+        async with websockets.connect(enhanced_server_url) as enhanced_ws:
+            enhanced_connections[client_id] = enhanced_ws
+            
+            # Create tasks for bidirectional communication
+            client_to_server_task = asyncio.create_task(
+                forward_messages(websocket, enhanced_ws, client_id, "client -> server")
+            )
+            server_to_client_task = asyncio.create_task(
+                forward_messages(enhanced_ws, websocket, client_id, "server -> client")
+            )
+            
+            # Wait for either task to complete (usually due to disconnection)
+            done, pending = await asyncio.wait(
+                [client_to_server_task, server_to_client_task],
+                return_when=asyncio.FIRST_COMPLETED
+            )
+            
+            # Cancel the pending task
+            for task in pending:
+                task.cancel()
+    
+    except Exception as e:
+        print(f"Error in WebSocket proxy for client {client_id}: {str(e)}")
+        try:
+            await websocket.send_json({
+                "type": "error",
+                "content": f"Proxy error: {str(e)}"
+            })
+        except:
+            pass
+    
+    finally:
+        # Clean up connections
+        proxy_connections.pop(client_id, None)
+        enhanced_connections.pop(client_id, None)
+        print(f"WebSocket proxy connection cleaned up for client {client_id}")
 
+
+async def forward_messages(source: WebSocket, destination: WebSocket, client_id: str, direction: str):
+    """
+    Forward messages between WebSocket connections.
+    
+    Args:
+        source: Source WebSocket
+        destination: Destination WebSocket
+        client_id: Client identifier
+        direction: Direction of message flow (for logging)
+    """
     try:
         while True:
-            print("Waiting for message...")
-            message = await websocket.receive_json()
-            print(f"Received message: {message}")
-
-            if message["type"] == "request":
-                print(f"Processing request: {message['content']}")
-                # Notify client that streaming is starting
-                await websocket.send_json({"type": "stream_start"})
-
-                try:
-                    # Run ra-aid with the request using -m flag and cowboy mode
-                    cmd = ["ra-aid", "-m", message["content"], "--cowboy-mode"]
-                    print(f"Executing command: {' '.join(cmd)}")
-
-                    # Create subprocess
-                    process = await asyncio.create_subprocess_exec(
-                        *cmd,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE,
-                    )
-                    print(f"Process started with PID: {process.pid}")
-
-                    # Read output and errors concurrently
-                    async def read_stream(stream, is_error=False):
-                        stream_type = "stderr" if is_error else "stdout"
-                        print(f"Starting to read from {stream_type}")
-                        while True:
-                            line = await stream.readline()
-                            if not line:
-                                print(f"End of {stream_type} stream")
-                                break
-
-                            try:
-                                decoded_line = line.decode().strip()
-                                print(f"{stream_type} line: {decoded_line}")
-                                if decoded_line:
-                                    await websocket.send_json(
-                                        {
-                                            "type": "chunk",
-                                            "chunk": {
-                                                "tools" if is_error else "agent": {
-                                                    "messages": [
-                                                        {
-                                                            "content": decoded_line,
-                                                            "status": (
-                                                                "error"
-                                                                if is_error
-                                                                else "info"
-                                                            ),
-                                                        }
-                                                    ]
-                                                }
-                                            },
-                                        }
-                                    )
-                            except Exception as e:
-                                print(f"Error sending output: {e}")
-
-                    # Create tasks for reading stdout and stderr
-                    stdout_task = asyncio.create_task(read_stream(process.stdout))
-                    stderr_task = asyncio.create_task(read_stream(process.stderr, True))
-
-                    # Wait for both streams to complete
-                    await asyncio.gather(stdout_task, stderr_task)
-
-                    # Wait for process to complete
-                    return_code = await process.wait()
-
-                    if return_code != 0:
-                        await websocket.send_json(
-                            {
-                                "type": "chunk",
-                                "chunk": {
-                                    "tools": {
-                                        "messages": [
-                                            {
-                                                "content": f"Process exited with code {return_code}",
-                                                "status": "error",
-                                            }
-                                        ]
-                                    }
-                                },
-                            }
-                        )
-
-                    # Notify client that streaming is complete
-                    await websocket.send_json(
-                        {"type": "stream_end", "request": message["content"]}
-                    )
-
-                except Exception as e:
-                    error_msg = f"Error executing ra-aid: {str(e)}"
-                    print(error_msg)
-                    await websocket.send_json(
-                        {
-                            "type": "chunk",
-                            "chunk": {
-                                "tools": {
-                                    "messages": [
-                                        {"content": error_msg, "status": "error"}
-                                    ]
-                                }
-                            },
-                        }
-                    )
-
-    except WebSocketDisconnect:
-        print("WebSocket client disconnected")
-        active_connections.remove(websocket)
+            # Receive message from source
+            message = await source.receive_text()
+            print(f"[{direction}] Forwarding message for client {client_id}")
+            
+            # Forward to destination
+            if isinstance(destination, WebSocket):
+                await destination.send_text(message)
+            else:
+                await destination.send(message)
+    
     except Exception as e:
-        print(f"WebSocket error: {e}")
-        try:
-            await websocket.send_json({"type": "error", "error": str(e)})
-        except Exception:
-            pass
-    finally:
-        if websocket in active_connections:
-            active_connections.remove(websocket)
-        print("WebSocket connection cleaned up")
+        print(f"Error forwarding messages for client {client_id} [{direction}]: {str(e)}")
+        raise
 
 
 @app.get("/config")
@@ -189,21 +148,40 @@ async def get_config(request: Request):
     return {"host": request.client.host, "port": request.scope.get("server")[1]}
 
 
-def run_server(host: str = "0.0.0.0", port: int = 8080):
-    """Run the FastAPI server."""
+@app.get("/health")
+async def health_check():
+    """Health check endpoint."""
+    # Check if we can connect to the enhanced server
+    try:
+        async with websockets.connect("ws://localhost:8000/health") as ws:
+            await ws.send(json.dumps({"type": "ping"}))
+            result = await asyncio.wait_for(ws.recv(), timeout=5)
+            return {"status": "healthy", "enhanced_server": json.loads(result)}
+    except:
+        return {"status": "degraded", "enhanced_server": "unavailable"}
+
+
+def run_server(host: str = "0.0.0.0", port: int = 3000):
+    """Run the proxy server."""
     uvicorn.run(app, host=host, port=port)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="RA.Aid Web Interface Server")
+    parser = argparse.ArgumentParser(description="RA.Aid Web Interface Proxy Server")
     parser.add_argument(
-        "--port", type=int, default=8080, help="Port to listen on (default: 8080)"
+        "--port", type=int, default=3000, help="Port to listen on (default: 3000)"
     )
     parser.add_argument(
         "--host",
         type=str,
         default="0.0.0.0",
         help="Host to listen on (default: 0.0.0.0)",
+    )
+    parser.add_argument(
+        "--enhanced-port",
+        type=int, 
+        default=8000,
+        help="Port of the enhanced server (default: 8000)"
     )
 
     args = parser.parse_args()
