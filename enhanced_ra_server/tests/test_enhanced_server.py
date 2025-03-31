@@ -6,6 +6,7 @@ import pytest
 import tempfile
 import os
 from fastapi.testclient import TestClient
+from unittest.mock import AsyncMock
 
 from enhanced_ra_server.enhanced_server import EnhancedRAServer
 from enhanced_ra_server.websocket_manager import ConnectionState
@@ -114,7 +115,7 @@ class TestEnhancedServer:
         popped_task = state.pop_next_task()
         assert popped_task == task2
         
-        # Queue should be empty now
+        # Now queue should be empty
         assert not state.has_pending_tasks()
         assert state.get_next_task() is None
         
@@ -126,6 +127,112 @@ class TestEnhancedServer:
         # Processing should be false now
         assert not state.is_processing
         assert task2["task_id"] in state.completed_tasks
+
+    def test_task_cancellation(self, test_config):
+        """Test task cancellation functionality."""
+        # Create server and get memory saver
+        server = EnhancedRAServer(test_config)
+        memory = server.memory
+        
+        # Create client state with tasks
+        client_id = "test-client"
+        state = ConnectionState(
+            model="test-model",
+            research_only=False,
+            client_id=client_id
+        )
+        
+        # Add tasks to the queue (task-2 and task-3)
+        for i in range(1, 3):
+            task = {
+                "content": f"Test task {i+1}",
+                "task_id": f"task-{i+1}",
+                "created_at": "timestamp",
+                "status": "pending"
+            }
+            state.add_task(task)
+            
+            # Store in memory
+            memory.store_task(
+                task_id=task["task_id"],
+                content=task["content"],
+                thread_id=client_id,
+                status="pending"
+            )
+        
+        # Mock the process_next_task method
+        server.process_next_task = AsyncMock()
+        
+        # Mock the send_update method
+        server.send_update = AsyncMock()
+        
+        # Set up processing state for task-1
+        state.current_task_id = "task-1"
+        state.is_processing = True
+        
+        # Store task-1 in memory
+        memory.store_task(
+            task_id="task-1",
+            content="Test task 1",
+            thread_id=client_id,
+            status="in_progress"
+        )
+        
+        # Test cancellation of specific task in queue (task-2)
+        message = {
+            "type": "cancel",
+            "task_id": "task-2"  # Cancel a task in the queue
+        }
+        
+        # Process the message
+        import asyncio
+        asyncio.run(server.process_message(client_id, message, state))
+        
+        # Check that task-2 was cancelled
+        server.send_update.assert_called_with(
+            client_id,
+            {
+                "type": "task_cancelled",
+                "content": {"task_id": "task-2"}
+            }
+        )
+        
+        # Verify task-2 is no longer in the queue
+        for task in state.task_queue:
+            assert task["task_id"] != "task-2"
+        
+        # Check that current task is still processing
+        assert state.current_task_id == "task-1"
+        assert state.is_processing
+        
+        # Test cancellation of current task
+        message = {
+            "type": "cancel",
+            "task_id": "task-1"  # Cancel the task in progress
+        }
+        
+        # Reset the mock
+        server.send_update.reset_mock()
+        server.process_next_task.reset_mock()
+        
+        # Process the message
+        asyncio.run(server.process_message(client_id, message, state))
+        
+        # Check that task-1 was cancelled
+        server.send_update.assert_called_with(
+            client_id,
+            {
+                "type": "task_cancelled",
+                "content": {"task_id": "task-1"}
+            }
+        )
+        
+        # Check processing state
+        assert state.current_task_id is None
+        assert not state.is_processing
+        
+        # Check that process_next_task was called to start the next task
+        server.process_next_task.assert_called_once_with(client_id, state)
 
 
 # WebSocket tests require more setup due to their asynchronous nature

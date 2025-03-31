@@ -82,7 +82,32 @@ class ConnectionState:
             self.current_task_id = None
             self.is_processing = False
             self.completed_tasks.append(task_id)
+    
+    def cancel_task(self, task_id: str) -> bool:
+        """
+        Cancel a task if it's in the queue or currently processing.
         
+        Args:
+            task_id: ID of the task to cancel
+            
+        Returns:
+            True if the task was found and canceled, False otherwise
+        """
+        # Check if the task is currently processing
+        if task_id == self.current_task_id:
+            self.current_task_id = None
+            self.is_processing = False
+            return True
+            
+        # Check if the task is in the queue
+        for i, task in enumerate(self.task_queue):
+            if task["task_id"] == task_id:
+                # Remove the task from the queue
+                self.task_queue.remove(task)
+                return True
+                
+        return False
+    
     def has_pending_tasks(self) -> bool:
         """
         Check if there are pending tasks in the queue.

@@ -50,6 +50,75 @@ class TestConnectionState:
         assert state.get_metadata("nonexistent") is None
         assert state.get_metadata("nonexistent", "default") == "default"
 
+    def test_mark_task_complete(self):
+        """Test marking a task as complete."""
+        state = ConnectionState()
+        state.current_task_id = "task-1"
+        state.is_processing = True
+        
+        # Mark task as complete
+        state.mark_task_complete("task-1")
+        
+        # Current task should be cleared and processing set to false
+        assert state.current_task_id is None
+        assert not state.is_processing
+        assert "task-1" in state.completed_tasks
+        
+        # Mark another task as complete (not currently processing)
+        state.mark_task_complete("task-2")
+        
+        # Should have no effect on state
+        assert state.current_task_id is None
+        assert not state.is_processing
+        assert "task-2" not in state.completed_tasks
+    
+    def test_cancel_task_current(self):
+        """Test cancelling the current task."""
+        state = ConnectionState()
+        state.current_task_id = "task-1"
+        state.is_processing = True
+        
+        # Cancel the current task
+        result = state.cancel_task("task-1")
+        
+        # Current task should be cleared and processing set to false
+        assert result is True
+        assert state.current_task_id is None
+        assert not state.is_processing
+        
+    def test_cancel_task_queued(self):
+        """Test cancelling a queued task."""
+        state = ConnectionState()
+        
+        # Add tasks to queue
+        task1 = {"task_id": "task-1", "content": "Test task 1"}
+        task2 = {"task_id": "task-2", "content": "Test task 2"}
+        state.add_task(task1)
+        state.add_task(task2)
+        
+        # Cancel the first task
+        result = state.cancel_task("task-1")
+        
+        # Task should be removed from queue
+        assert result is True
+        assert len(state.task_queue) == 1
+        assert state.task_queue[0]["task_id"] == "task-2"
+        
+    def test_cancel_task_not_found(self):
+        """Test cancelling a non-existent task."""
+        state = ConnectionState()
+        
+        # Add a task to queue
+        task = {"task_id": "task-1", "content": "Test task"}
+        state.add_task(task)
+        
+        # Try to cancel a non-existent task
+        result = state.cancel_task("non-existent")
+        
+        # Method should return False and queue should remain unchanged
+        assert result is False
+        assert len(state.task_queue) == 1
+
 
 class TestWebSocketManager:
     """Test cases for the WebSocketManager class."""

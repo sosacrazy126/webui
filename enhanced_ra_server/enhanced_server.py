@@ -442,13 +442,8 @@ class EnhancedRAServer:
             task_id = message.get("task_id")
             
             if task_id:
-                # Cancel a specific task
-                if task_id == state.current_task_id:
-                    # Cancel the current task
-                    # In future, implement actual cancellation of running agent tasks
-                    state.current_task_id = None
-                    state.is_processing = False
-                    
+                # Cancel a specific task using the ConnectionState.cancel_task method
+                if state.cancel_task(task_id):
                     # Update task status in database
                     self.memory.store_task(
                         task_id=task_id,
@@ -460,7 +455,7 @@ class EnhancedRAServer:
                     # Log cancellation
                     self.memory.log_task_message(
                         task_id=task_id,
-                        message="Task cancelled by user while in progress",
+                        message=f"Task cancelled by user",
                         message_type="cancel",
                         thread_id=client_id
                     )
@@ -470,48 +465,35 @@ class EnhancedRAServer:
                         "content": {"task_id": task_id}
                     })
                     
-                    # Start processing the next task
-                    if state.has_pending_tasks():
+                    # Start processing the next task if current task was cancelled
+                    if not state.is_processing and state.has_pending_tasks():
                         await self.process_next_task(client_id, state)
                 else:
-                    # Try to remove the task from the queue
-                    for i, task in enumerate(state.task_queue):
-                        if task.get("task_id") == task_id:
-                            state.task_queue.remove(task)
-                            
-                            # Update task status in database
-                            self.memory.store_task(
-                                task_id=task_id,
-                                content="", # Existing content will be preserved
-                                thread_id=client_id,
-                                status="cancelled"
-                            )
-                            
-                            # Log cancellation
-                            self.memory.log_task_message(
-                                task_id=task_id,
-                                message="Task cancelled by user while queued",
-                                message_type="cancel",
-                                thread_id=client_id
-                            )
-                            
-                            await self.send_update(client_id, {
-                                "type": "task_cancelled",
-                                "content": {"task_id": task_id}
-                            })
-                            break
-                    else:
-                        await self.send_update(client_id, {
-                            "type": "error",
-                            "content": f"Task {task_id} not found"
-                        })
+                    await self.send_update(client_id, {
+                        "type": "error",
+                        "content": f"Task {task_id} not found"
+                    })
             else:
                 # Cancel all tasks for this client
-                state.current_task_id = None
-                state.is_processing = False
+                # Cancel current task
+                if state.current_task_id:
+                    task_id = state.current_task_id
+                    state.cancel_task(task_id)
+                    self.memory.store_task(
+                        task_id=task_id,
+                        content="", # Existing content will be preserved
+                        thread_id=client_id,
+                        status="cancelled"
+                    )
+                    self.memory.log_task_message(
+                        task_id=task_id,
+                        message="Task cancelled as part of bulk cancellation",
+                        message_type="cancel",
+                        thread_id=client_id
+                    )
                 
-                # Update status for all queued tasks
-                for task in state.task_queue:
+                # Update status for all queued tasks and clear queue
+                for task in list(state.task_queue):
                     task_id = task.get("task_id")
                     self.memory.store_task(
                         task_id=task_id,
